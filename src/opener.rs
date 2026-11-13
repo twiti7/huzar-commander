@@ -265,7 +265,7 @@ pub fn pick_editor_executable() -> Option<PathBuf> {
 #[cfg(not(windows))]
 pub fn pick_editor_executable() -> Option<PathBuf> {
     if let Ok(output) = std::process::Command::new("zenity")
-        .args(&["--file-selection", "--title=Wybierz edytor"])
+        .args(["--file-selection", "--title=Wybierz edytor"])
         .output()
     {
         if output.status.success() {
@@ -276,7 +276,7 @@ pub fn pick_editor_executable() -> Option<PathBuf> {
         }
     }
     if let Ok(output) = std::process::Command::new("kdialog")
-        .args(&["--getopenfilename", ".", "*|Wszystkie pliki"])
+        .args(["--getopenfilename", ".", "*|Wszystkie pliki"])
         .output()
     {
         if output.status.success() {

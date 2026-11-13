@@ -970,12 +970,11 @@ impl CommanderApp {
                 #[cfg(not(target_os = "windows"))]
                 {
                     let term = std::env::var("TERMINAL").unwrap_or_else(|_| "x-terminal-emulator".to_string());
-                    if std::process::Command::new(&term).current_dir(&path).spawn().is_err() {
-                        if std::process::Command::new("gnome-terminal").current_dir(&path).spawn().is_err() {
-                            if std::process::Command::new("konsole").current_dir(&path).spawn().is_err() {
-                                let _ = std::process::Command::new("xterm").current_dir(&path).spawn();
-                            }
-                        }
+                    if std::process::Command::new(&term).current_dir(&path).spawn().is_err()
+                        && std::process::Command::new("gnome-terminal").current_dir(&path).spawn().is_err()
+                        && std::process::Command::new("konsole").current_dir(&path).spawn().is_err()
+                    {
+                        let _ = std::process::Command::new("xterm").current_dir(&path).spawn();
                     }
                 }
             }

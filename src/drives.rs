@@ -92,6 +92,7 @@ fn get_drive_space(path_str: &str) -> (u64, u64) {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::unnecessary_cast)]
 fn get_unix_space(path_str: &str) -> (u64, u64) {
     #[cfg(unix)]
     {
