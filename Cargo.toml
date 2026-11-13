@@ -1,0 +1,47 @@
+[package]
+name = "huzar-commander"
+version = "0.1.0"
+edition = "2021"
+authors = ["Piotr Truskolaski <piotr.truskolaski@gmail.com>"]
+description = "Huzar Commander - Fast, dual-panel orthodox file manager in Rust with streaming viewer and real-time I/O telemetry"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["file-manager", "commander", "orthodox", "egui", "dual-panel"]
+categories = ["command-line-utilities", "filesystem", "gui"]
+
+[lib]
+name = "huzar_commander"
+path = "src/lib.rs"
+
+[[bin]]
+name = "huzar-commander"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.31"
+egui_extras = "0.31"
+chrono = "0.4"
+humansize = "2.1"
+trash = "5.2"
+open = "5.3"
+walkdir = "2.5"
+crossbeam-channel = "0.5"
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+pulldown-cmark = { version = "0.12", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.31", default-features = false, features = ["x11", "wayland"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

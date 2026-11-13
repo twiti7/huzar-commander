@@ -1,0 +1,9 @@
+# Example local Cargo configuration for Windows LLVM/GNU toolchain.
+# Copy this file to .cargo/config.toml if you want to use the x86_64-pc-windows-gnullvm target.
+
+[build]
+target = "x86_64-pc-windows-gnullvm"
+
+# Optional: specify custom GCC linker path if using MinGW/WinLibs
+# [target.x86_64-pc-windows-gnu]
+# linker = "gcc"
