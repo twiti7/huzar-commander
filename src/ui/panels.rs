@@ -12,6 +12,9 @@ use crate::panel::PanelState;
 pub enum PanelAction {
     OpenDriveMenu(PanelSide),
     OpenItem(FileItem),
+    ChangeDir(PanelSide, std::path::PathBuf),
+    CancelLoading(PanelSide),
+    GoUp(PanelSide),
 }
 
 pub fn sort_indicator(current: SortColumn, target: SortColumn, order: SortOrder) -> &'static str {
@@ -107,7 +110,7 @@ pub fn render_panel(
 
                         let resp = ui.add(btn);
                         if resp.clicked() {
-                            panel.change_dir(drive.path.clone());
+                            action = Some(PanelAction::ChangeDir(side, drive.path.clone()));
                         }
                         resp.surrender_focus();
                     }
@@ -131,7 +134,7 @@ pub fn render_panel(
                             let btn = egui::Button::new(RichText::new("[..]").strong().color(Color32::YELLOW))
                                 .fill(Color32::from_rgb(30, 45, 75));
                             if ui.add(btn).clicked() {
-                                panel.go_up();
+                                action = Some(PanelAction::GoUp(side));
                             }
 
                             let path_display = format!("{}/*.*", panel.display_path());
@@ -190,12 +193,60 @@ pub fn render_panel(
 
                 ui.separator();
 
-                // File Table
-                let total_rows = panel.items.len();
-                let mut clicked_row = None;
-                let mut double_clicked_row = None;
-                let mut right_clicked_row = None;
-                let mut sort_clicked = None;
+                if panel.is_loading() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(50.0);
+                        ui.add(egui::Spinner::new().size(36.0));
+                        ui.add_space(16.0);
+                        ui.label(
+                            RichText::new(i18n.t("panels.loading_title"))
+                                .strong()
+                                .size(15.0)
+                                .color(Color32::from_rgb(0, 200, 255)),
+                        );
+                        ui.add_space(8.0);
+                        if let Some(target) = panel.loading_target() {
+                            ui.label(
+                                RichText::new(target.to_string_lossy().to_string())
+                                    .size(13.0)
+                                    .color(Color32::from_rgb(255, 230, 120))
+                                    .monospace(),
+                            );
+                        }
+                        ui.add_space(6.0);
+                        let elapsed = panel.loading_elapsed();
+                        ui.label(
+                            RichText::new(format!("{:.1} s", elapsed.as_secs_f32()))
+                                .size(12.0)
+                                .color(Color32::from_rgb(160, 175, 200)),
+                        );
+                        ui.add_space(18.0);
+                        let cancel_btn = egui::Button::new(
+                            RichText::new(i18n.t("panels.loading_cancel"))
+                                .strong()
+                                .size(13.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(Color32::from_rgb(180, 45, 45))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(255, 90, 90)));
+
+                        if ui.add_sized([160.0, 32.0], cancel_btn).clicked() {
+                            action = Some(PanelAction::CancelLoading(side));
+                        }
+                        ui.add_space(12.0);
+                        ui.label(
+                            RichText::new(i18n.t("panels.loading_tip"))
+                                .size(11.0)
+                                .color(Color32::from_rgb(120, 140, 170)),
+                        );
+                    });
+                } else {
+                    // File Table
+                    let total_rows = panel.items.len();
+                    let mut clicked_row = None;
+                    let mut double_clicked_row = None;
+                    let mut right_clicked_row = None;
+                    let mut sort_clicked = None;
 
                 let mut table = TableBuilder::new(ui)
                     .striped(true)
@@ -292,17 +343,19 @@ pub fn render_panel(
 
                             // Size column (Right-aligned)
                             row.col(|ui| {
-                                let size_str = if item.is_dir {
-                                    if item.size > 0 {
-                                        format_size(item.size, DECIMAL)
+                                let (size_str, size_color) = if item.is_dir {
+                                    if panel.is_calculating_dir(&item.path) {
+                                        ("<...>".to_string(), Color32::from_rgb(0, 220, 255))
+                                    } else if panel.is_calculated_dir(&item.path) || item.size > 0 {
+                                        (format_size(item.size, DECIMAL), text_color)
                                     } else {
-                                        "<DIR>".to_string()
+                                        ("<DIR>".to_string(), text_color)
                                     }
                                 } else {
-                                    format_size(item.size, DECIMAL)
+                                    (format_size(item.size, DECIMAL), text_color)
                                 };
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(size_str).color(text_color));
+                                    ui.label(RichText::new(size_str).color(size_color));
                                 });
                             });
 
@@ -374,6 +427,7 @@ pub fn render_panel(
                         action = Some(PanelAction::OpenItem(it));
                     }
                 }
+            }
             });
     });
 

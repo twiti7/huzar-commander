@@ -58,6 +58,8 @@ pub struct CommanderApp {
     pub cmd_line: String,
     pub status_bar_msg: Option<(String, Instant)>,
     pub last_copy_info: Option<(PathBuf, String)>,
+
+    pub egui_ctx: egui::Context,
 }
 
 impl CommanderApp {
@@ -77,11 +79,38 @@ impl CommanderApp {
         };
         let current_dir = std::env::current_dir().unwrap_or(fallback_path);
 
-        let left_path = current_dir.clone();
-        let right_path = if drives.len() > 1 {
+        let valid_path_args: Vec<PathBuf> = std::env::args()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .map(PathBuf::from)
+            .collect();
+
+        let mut focus_item = None;
+        let left_path = if let Some(p) = valid_path_args.first() {
+            if p.is_dir() {
+                p.clone()
+            } else if p.is_file() {
+                focus_item = p.file_name().map(|n| n.to_string_lossy().to_string());
+                p.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| current_dir.clone())
+            } else {
+                current_dir.clone()
+            }
+        } else {
+            current_dir.clone()
+        };
+
+        let right_path = if let Some(p) = valid_path_args.get(1) {
+            if p.is_dir() {
+                p.clone()
+            } else if drives.len() > 1 {
+                drives[1].path.clone()
+            } else {
+                left_path.clone()
+            }
+        } else if drives.len() > 1 {
             drives[1].path.clone()
         } else {
-            current_dir
+            left_path.clone()
         };
 
         let config = crate::config::AppConfig::load();
@@ -98,8 +127,16 @@ impl CommanderApp {
             repaint_ctx.request_repaint();
         });
 
+        let mut left_panel = PanelState::new(left_path);
+        if let Some(target_name) = focus_item {
+            if let Some(pos) = left_panel.items.iter().position(|it| it.name == target_name) {
+                left_panel.cursor_idx = pos;
+                left_panel.scroll_to_cursor = true;
+            }
+        }
+
         let mut app = Self {
-            left_panel: PanelState::new(left_path),
+            left_panel,
             right_panel: PanelState::new(right_path),
             active_side: PanelSide::Left,
             drives,
@@ -125,6 +162,7 @@ impl CommanderApp {
             cmd_line: String::new(),
             status_bar_msg: None,
             last_copy_info: None,
+            egui_ctx: cc.egui_ctx.clone(),
         };
 
         let welcome = app.i18n.t("status.welcome").to_string();
@@ -264,9 +302,34 @@ impl CommanderApp {
         }
     }
 
+    fn make_repaint_signal(&self) -> std::sync::Arc<dyn Fn() + Send + Sync> {
+        let ctx = self.egui_ctx.clone();
+        std::sync::Arc::new(move || {
+            ctx.request_repaint();
+        })
+    }
+
+    fn poll_panel_loaders(&mut self) {
+        if let Some(Err(err)) = self.left_panel.poll_loading() {
+            self.set_status(format!("Błąd wczytywania katalogu: {}", err));
+        }
+        if let Some(Err(err)) = self.right_panel.poll_loading() {
+            self.set_status(format!("Błąd wczytywania katalogu: {}", err));
+        }
+    }
+
+    fn navigate_panel_to(&mut self, side: PanelSide, path: PathBuf) {
+        let repaint_signal = self.make_repaint_signal();
+        match side {
+            PanelSide::Left => self.left_panel.start_loading_dir(path, None, Some(repaint_signal)),
+            PanelSide::Right => self.right_panel.start_loading_dir(path, None, Some(repaint_signal)),
+        }
+    }
+
     fn open_item(&mut self, item: &FileItem) {
         if item.is_parent {
-            self.active_panel_mut().go_up();
+            let repaint_signal = self.make_repaint_signal();
+            self.active_panel_mut().go_up_async(Some(repaint_signal));
         } else if self.active_panel().is_in_zip() {
             if item.is_dir {
                 let name = item.name.clone();
@@ -295,7 +358,8 @@ impl CommanderApp {
             }
         } else if item.is_dir {
             let path = item.path.clone();
-            self.active_panel_mut().change_dir(path);
+            let repaint_signal = self.make_repaint_signal();
+            self.active_panel_mut().start_loading_dir(path, None, Some(repaint_signal));
         } else if crate::zip_support::is_zip_file(&item.path) {
             self.active_panel_mut().enter_zip(item.path.clone());
         } else {
@@ -532,18 +596,37 @@ impl CommanderApp {
             })
         };
 
-        if let Some((is_dir, path, name, size, modified, readonly, hidden)) = target {
-            let mut files_cnt = 0;
-            let mut dirs_cnt = 0;
-            if is_dir {
-                for entry in walkdir::WalkDir::new(&path).min_depth(1).into_iter().flatten() {
-                    if entry.file_type().is_dir() {
-                        dirs_cnt += 1;
-                    } else if entry.file_type().is_file() {
-                        files_cnt += 1;
+        if let Some((is_dir, path, name, initial_size, modified, readonly, hidden)) = target {
+            let (is_calculating, rx, size) = if is_dir {
+                let known_size = if self.active_panel().is_calculated_dir(&path) {
+                    initial_size
+                } else {
+                    0
+                };
+                let (tx, rx) = crossbeam_channel::unbounded();
+                let dir_path = path.clone();
+                let repaint_signal = self.make_repaint_signal();
+                std::thread::spawn(move || {
+                    let mut total_size: u64 = 0;
+                    let mut files_cnt = 0;
+                    let mut dirs_cnt = 0;
+                    for entry in walkdir::WalkDir::new(&dir_path).min_depth(1).into_iter().flatten() {
+                        if entry.file_type().is_dir() {
+                            dirs_cnt += 1;
+                        } else if entry.file_type().is_file() {
+                            files_cnt += 1;
+                            if let Ok(meta) = entry.metadata() {
+                                total_size = total_size.saturating_add(meta.len());
+                            }
+                        }
                     }
-                }
-            }
+                    let _ = tx.send((total_size, files_cnt, dirs_cnt));
+                    repaint_signal();
+                });
+                (true, Some(rx), known_size)
+            } else {
+                (false, None, initial_size)
+            };
 
             self.properties = PropertiesDialogState {
                 is_open: true,
@@ -551,22 +634,71 @@ impl CommanderApp {
                 path,
                 is_dir,
                 size,
-                files_count: files_cnt,
-                dirs_count: dirs_cnt,
+                files_count: 0,
+                dirs_count: 0,
                 modified,
                 readonly,
                 hidden,
+                is_calculating,
+                rx,
             };
         }
     }
 
+    fn poll_properties_calculation(&mut self) {
+        if self.properties.is_open && self.properties.is_calculating {
+            if let Some(ref rx) = self.properties.rx {
+                if let Ok((total_size, files, dirs)) = rx.try_recv() {
+                    self.properties.size = total_size;
+                    self.properties.files_count = files;
+                    self.properties.dirs_count = dirs;
+                    self.properties.is_calculating = false;
+                    self.properties.rx = None;
+
+                    // Also cache in active panel so Size column reflects it!
+                    let dir_path = self.properties.path.clone();
+                    let active = self.active_panel_mut();
+                    if let Some(item) = active.items.iter_mut().find(|it| it.path == dir_path) {
+                        item.size = total_size;
+                    }
+                    if let Some(all_item) = active.all_items.iter_mut().find(|it| it.path == dir_path) {
+                        all_item.size = total_size;
+                    }
+                    active.calculated_dirs.insert(dir_path);
+                    active.recalculate_totals();
+                }
+            }
+        } else if !self.properties.is_open && self.properties.is_calculating {
+            self.properties.is_calculating = false;
+            self.properties.rx = None;
+        }
+    }
+
     fn calculate_current_dir_size(&mut self) {
-        let res = self.active_panel_mut().calculate_cursor_dir_size();
-        if let Some(size) = res {
-            self.set_status(format!(
-                "Rozmiar katalogu: {}",
-                humansize::format_size(size, humansize::DECIMAL)
-            ));
+        let repaint_signal = self.make_repaint_signal();
+        let active = self.active_panel();
+        if let Some(item) = active.items.get(active.cursor_idx) {
+            if item.is_dir && !item.is_parent {
+                let path = item.path.clone();
+                let name = item.name.clone();
+                self.active_panel_mut().start_calculate_dir_size(path, Some(repaint_signal));
+                self.set_status(format!("Obliczanie rozmiaru folderu '{}'...", name));
+            }
+        }
+    }
+
+    fn poll_dir_size_calculations(&mut self) {
+        let left_finished = self.left_panel.poll_dir_sizes();
+        for (path, size, files) in left_finished {
+            let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let size_str = humansize::format_size(size, humansize::DECIMAL);
+            self.set_status(format!("Obliczono rozmiar folderu '{}': {} (plików: {})", name, size_str, files));
+        }
+        let right_finished = self.right_panel.poll_dir_sizes();
+        for (path, size, files) in right_finished {
+            let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let size_str = humansize::format_size(size, humansize::DECIMAL);
+            self.set_status(format!("Obliczono rozmiar folderu '{}': {} (plików: {})", name, size_str, files));
         }
     }
 
@@ -640,11 +772,9 @@ impl CommanderApp {
 
     fn jump_to_search_result(&mut self, res: &crate::search::SearchResult) {
         if let Some(parent) = res.path.parent() {
-            self.active_panel_mut().change_dir(parent.to_path_buf());
-            if let Some(idx) = self.active_panel().items.iter().position(|it| it.name == res.name) {
-                self.active_panel_mut().cursor_idx = idx;
-                self.active_panel_mut().scroll_to_cursor = true;
-            }
+            let repaint_signal = self.make_repaint_signal();
+            let file_name = res.name.clone();
+            self.active_panel_mut().start_loading_dir(parent.to_path_buf(), Some(file_name), Some(repaint_signal));
         }
         self.search.is_open = false;
     }
@@ -782,11 +912,19 @@ impl CommanderApp {
             } else if !i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::Minus) {
                 self.open_mask_select_dialog(false);
             } else if !i.modifiers.any() && i.key_pressed(Key::Space) {
-                self.calculate_current_dir_size();
+                is_panel_nav = true;
+                let repaint_signal = self.make_repaint_signal();
+                if let Some(path) = self.active_panel_mut().space_select_and_calculate(Some(repaint_signal)) {
+                    let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    self.set_status(format!("Obliczanie rozmiaru folderu '{}' w tle...", name));
+                }
             } else if i.modifiers.ctrl && i.key_pressed(Key::F) {
                 self.active_panel_mut().is_filter_open = true;
             } else if i.key_pressed(Key::Escape) {
-                if !self.active_panel().filter.is_empty() {
+                if self.active_panel_mut().cancel_loading() || self.passive_panel_mut().cancel_loading() {
+                    let msg = self.i18n.t("panels.loading_cancelled").to_string();
+                    self.set_status(msg);
+                } else if !self.active_panel().filter.is_empty() {
                     self.active_panel_mut().clear_filter();
                 }
             } else if !i.modifiers.alt && i.key_pressed(Key::F1) {
@@ -811,7 +949,8 @@ impl CommanderApp {
                 self.trigger_f8_delete();
             } else if i.key_pressed(Key::Backspace) {
                 is_panel_nav = true;
-                self.active_panel_mut().go_up();
+                let repaint_signal = self.make_repaint_signal();
+                self.active_panel_mut().go_up_async(Some(repaint_signal));
             } else if i.key_pressed(Key::ArrowUp) {
                 is_panel_nav = true;
                 let p = self.active_panel_mut();
@@ -985,6 +1124,25 @@ impl CommanderApp {
         match action {
             PanelAction::OpenDriveMenu(side) => self.open_drive_menu(side),
             PanelAction::OpenItem(item) => self.open_item(&item),
+            PanelAction::ChangeDir(side, path) => self.navigate_panel_to(side, path),
+            PanelAction::CancelLoading(side) => {
+                let p = match side {
+                    PanelSide::Left => &mut self.left_panel,
+                    PanelSide::Right => &mut self.right_panel,
+                };
+                if p.cancel_loading() {
+                    let msg = self.i18n.t("panels.loading_cancelled").to_string();
+                    self.set_status(msg);
+                }
+            }
+            PanelAction::GoUp(side) => {
+                let repaint_signal = self.make_repaint_signal();
+                let p = match side {
+                    PanelSide::Left => &mut self.left_panel,
+                    PanelSide::Right => &mut self.right_panel,
+                };
+                p.go_up_async(Some(repaint_signal));
+            }
         }
     }
 
@@ -1150,10 +1308,7 @@ impl CommanderApp {
             &self.right_panel.current_path,
             &self.i18n,
         ) {
-            match side {
-                PanelSide::Left => self.left_panel.change_dir(path),
-                PanelSide::Right => self.right_panel.change_dir(path),
-            }
+            self.navigate_panel_to(side, path);
             self.active_side = side;
         }
 
@@ -1210,13 +1365,21 @@ impl CommanderApp {
 
 impl eframe::App for CommanderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_panel_loaders();
+        self.poll_dir_size_calculations();
+        self.poll_properties_calculation();
         self.handle_worker_events(ctx);
         self.handle_keyboard_shortcuts(ctx);
         self.poll_search_messages();
 
-        // Keep repainting smoothly while transfer or search is active
+        // Keep repainting smoothly while transfer, search, directory loading or size calculation is active
         if self.progress.is_open
             || self.search.handle.is_some()
+            || self.left_panel.is_loading()
+            || self.right_panel.is_loading()
+            || self.left_panel.has_calculating_dirs()
+            || self.right_panel.has_calculating_dirs()
+            || (self.properties.is_open && self.properties.is_calculating)
             || self.worker.is_busy()
             || !self.worker.event_rx.is_empty()
         {

@@ -1080,17 +1080,30 @@ pub fn render_properties_dialog(
                     ui.end_row();
 
                     ui.label(RichText::new(i18n.t("dialogs.props_size")).strong());
-                    let size_text =
-                        format!("{} ({} B)", format_size(state.size, DECIMAL), state.size);
+                    let size_text = if state.is_dir && state.is_calculating {
+                        if state.size > 0 {
+                            format!("{} ({})", format_size(state.size, DECIMAL), i18n.t("dialogs.props_calculating"))
+                        } else {
+                            format!("<{}>", i18n.t("dialogs.props_calculating"))
+                        }
+                    } else {
+                        format!("{} ({} B)", format_size(state.size, DECIMAL), state.size)
+                    };
                     ui.label(size_text);
                     ui.end_row();
 
                     if state.is_dir {
-                        let contains_lbl = if i18n.language() == crate::i18n::Language::Pl { "Zawiera:" } else { "Contains:" };
-                        let items_lbl = if i18n.language() == crate::i18n::Language::Pl {
-                            format!("{} plików, {} folderów", state.files_count, state.dirs_count)
+                        let contains_lbl = i18n.t("dialogs.props_contains");
+                        let items_lbl = if state.is_calculating {
+                            format!("<{}>", i18n.t("dialogs.props_calculating"))
                         } else {
-                            format!("{} files, {} folders", state.files_count, state.dirs_count)
+                            i18n.t_fmt(
+                                "dialogs.props_contains_fmt",
+                                &[
+                                    ("files", &state.files_count.to_string()),
+                                    ("dirs", &state.dirs_count.to_string()),
+                                ],
+                            )
                         };
                         ui.label(RichText::new(contains_lbl).strong());
                         ui.label(items_lbl);
@@ -1103,19 +1116,17 @@ pub fn render_properties_dialog(
                         ui.end_row();
                     }
 
-                    let attrs_lbl = if i18n.language() == crate::i18n::Language::Pl { "Atrybuty:" } else { "Attributes:" };
+                    let attrs_lbl = i18n.t("dialogs.props_attributes");
                     ui.label(RichText::new(attrs_lbl).strong());
                     let mut attrs = Vec::new();
                     if state.readonly {
                         attrs.push(i18n.t("dialogs.props_readonly"));
                     }
                     if state.hidden {
-                        let hidden_lbl = if i18n.language() == crate::i18n::Language::Pl { "Ukryty" } else { "Hidden" };
-                        attrs.push(hidden_lbl);
+                        attrs.push(i18n.t("dialogs.props_hidden"));
                     }
                     if attrs.is_empty() {
-                        let normal_lbl = if i18n.language() == crate::i18n::Language::Pl { "Zwykły (A)" } else { "Normal (A)" };
-                        attrs.push(normal_lbl);
+                        attrs.push(i18n.t("dialogs.props_normal"));
                     }
                     ui.label(attrs.join(", "));
                     ui.end_row();
@@ -1129,6 +1140,8 @@ pub fn render_properties_dialog(
                         || ui.input(|i| i.key_pressed(Key::Escape) || i.key_pressed(Key::Enter))
                     {
                         state.is_open = false;
+                        state.is_calculating = false;
+                        state.rx = None;
                     }
                 });
             });

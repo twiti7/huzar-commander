@@ -55,7 +55,11 @@
     "clear_filter": "Wyczyść filtr (Esc)",
     "open_drives": "Otwórz listę dysków ({key})",
     "status_summary": "Wybrano: {sel_count} ({sel_bytes}) | Razem: {total_count} ({total_bytes})",
-    "items_count": "{filtered}/{total} el."
+    "items_count": "{filtered}/{total} el.",
+    "loading_title": "Łączenie z zasobem / wczytywanie katalogu...",
+    "loading_cancel": "✖ Anuluj (Esc)",
+    "loading_tip": "Możesz swobodnie pracować w drugim panelu.",
+    "loading_cancelled": "Przerwano wczytywanie katalogu"
   },
   "dialogs": {
     "btn_ok": "OK",
@@ -100,6 +104,12 @@
     "props_type_file": "Plik zwykły",
     "props_modified": "Zmodyfikowano:",
     "props_readonly": "Tylko do odczytu",
+    "props_calculating": "obliczanie...",
+    "props_contains": "Zawiera:",
+    "props_contains_fmt": "{files} plików, {dirs} folderów",
+    "props_attributes": "Atrybuty:",
+    "props_hidden": "Ukryty",
+    "props_normal": "Zwykły (A)",
     "drive_title_left": "Wybór dysku — lewy panel",
     "drive_title_right": "Wybór dysku — prawy panel",
     "drive_free_total": "{free} wolne z {total}",

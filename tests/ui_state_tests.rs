@@ -1,6 +1,6 @@
 use std::io::Write;
 use huzar_commander::opener::ViewerMode;
-use huzar_commander::ui::state::{SearchDialogState, ViewerWindowState};
+use huzar_commander::ui::state::{PropertiesDialogState, SearchDialogState, ViewerWindowState};
 
 #[test]
 fn test_viewer_window_state_paging_and_modes() {
@@ -171,4 +171,36 @@ fn test_viewer_window_state_percentage_calculation() {
 
     viewer.scroll_ratio = 1.0;
     assert_eq!(viewer.current_visible_offset(), 10 * 1024);
+}
+
+#[test]
+fn test_properties_dialog_state_async_calculation() {
+    let mut state = PropertiesDialogState::default();
+    assert!(!state.is_open);
+    assert!(!state.is_calculating);
+    assert!(state.rx.is_none());
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    state.is_open = true;
+    state.is_dir = true;
+    state.is_calculating = true;
+    state.rx = Some(rx);
+
+    // Simulate worker calculation
+    tx.send((1024 * 1024, 42, 5)).unwrap();
+
+    if let Some(ref rx) = state.rx {
+        let (size, files, dirs) = rx.try_recv().unwrap();
+        state.size = size;
+        state.files_count = files;
+        state.dirs_count = dirs;
+        state.is_calculating = false;
+        state.rx = None;
+    }
+
+    assert_eq!(state.size, 1024 * 1024);
+    assert_eq!(state.files_count, 42);
+    assert_eq!(state.dirs_count, 5);
+    assert!(!state.is_calculating);
+    assert!(state.rx.is_none());
 }

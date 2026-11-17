@@ -1,9 +1,33 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+use crossbeam_channel::{Receiver, Sender};
 
 use crate::fs_item::{FileItem, SortColumn, SortOrder};
 use crate::zip_support::{is_zip_file, list_zip_entries, ZipLocation};
+
+#[derive(Clone)]
+pub struct DirLoadHandle {
+    pub target_path: PathBuf,
+    pub old_dir_name: Option<String>,
+    pub rx: Receiver<Result<Vec<FileItem>, String>>,
+    pub cancel: Arc<AtomicBool>,
+    pub started_at: Instant,
+}
+
+impl std::fmt::Debug for DirLoadHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirLoadHandle")
+            .field("target_path", &self.target_path)
+            .field("old_dir_name", &self.old_dir_name)
+            .field("started_at", &self.started_at)
+            .finish()
+    }
+}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -27,10 +51,16 @@ pub struct PanelState {
     pub selected_bytes: u64,
     pub selected_count: usize,
     pub error_message: Option<String>,
+    pub loading_handle: Option<DirLoadHandle>,
+    pub calculating_dir_sizes: HashSet<PathBuf>,
+    pub calculated_dirs: HashSet<PathBuf>,
+    pub dir_size_tx: Sender<(PathBuf, u64, usize)>,
+    pub dir_size_rx: Receiver<(PathBuf, u64, usize)>,
 }
 
 impl PanelState {
     pub fn new(initial_path: PathBuf) -> Self {
+        let (dir_size_tx, dir_size_rx) = crossbeam_channel::unbounded();
         let mut panel = Self {
             current_path: initial_path,
             all_items: Vec::new(),
@@ -51,6 +81,11 @@ impl PanelState {
             selected_bytes: 0,
             selected_count: 0,
             error_message: None,
+            loading_handle: None,
+            calculating_dir_sizes: HashSet::new(),
+            calculated_dirs: HashSet::new(),
+            dir_size_tx,
+            dir_size_rx,
         };
         panel.refresh();
         panel
@@ -116,6 +151,8 @@ impl PanelState {
 
     pub fn refresh(&mut self) {
         self.error_message = None;
+        self.calculating_dir_sizes.clear();
+        self.calculated_dirs.clear();
         let mut new_items = Vec::new();
 
         if let Some(ref loc) = self.zip_location {
@@ -206,6 +243,162 @@ impl PanelState {
                     self.scroll_to_cursor = true;
                 }
             }
+        }
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading_handle.is_some()
+    }
+
+    pub fn loading_target(&self) -> Option<&PathBuf> {
+        self.loading_handle.as_ref().map(|h| &h.target_path)
+    }
+
+    pub fn loading_elapsed(&self) -> std::time::Duration {
+        self.loading_handle
+            .as_ref()
+            .map(|h| h.started_at.elapsed())
+            .unwrap_or_default()
+    }
+
+    pub fn cancel_loading(&mut self) -> bool {
+        if let Some(handle) = self.loading_handle.take() {
+            handle.cancel.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn start_loading_dir(
+        &mut self,
+        new_path: PathBuf,
+        old_dir_name: Option<String>,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        // Przerwij ewentualne poprzednie wczytywanie w toku
+        self.cancel_loading();
+
+        if self.zip_location.is_some() {
+            self.zip_location = None;
+        }
+
+        self.custom_title = None;
+        self.error_message = None;
+        self.calculating_dir_sizes.clear();
+        self.calculated_dirs.clear();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_thread = Arc::clone(&cancel);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let path_to_scan = new_path.clone();
+
+        std::thread::spawn(move || {
+            if cancel_thread.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let mut new_items = Vec::new();
+            if let Some(parent) = path_to_scan.parent() {
+                new_items.push(FileItem::new_parent(parent.to_path_buf()));
+            }
+
+            match std::fs::read_dir(&path_to_scan) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        if cancel_thread.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if let Some(item) = FileItem::from_path(&entry.path()) {
+                            new_items.push(item);
+                        }
+                    }
+                    if !cancel_thread.load(Ordering::Relaxed) {
+                        let _ = tx.send(Ok(new_items));
+                        if let Some(sig) = repaint_signal {
+                            sig();
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !cancel_thread.load(Ordering::Relaxed) {
+                        let _ = tx.send(Err(e.to_string()));
+                        if let Some(sig) = repaint_signal {
+                            sig();
+                        }
+                    }
+                }
+            }
+        });
+
+        self.loading_handle = Some(DirLoadHandle {
+            target_path: new_path,
+            old_dir_name,
+            rx,
+            cancel,
+            started_at: Instant::now(),
+        });
+    }
+
+    pub fn poll_loading(&mut self) -> Option<Result<PathBuf, String>> {
+        let handle = self.loading_handle.as_ref()?;
+        match handle.rx.try_recv() {
+            Ok(Ok(new_items)) => {
+                let target_path = handle.target_path.clone();
+                let old_dir_name = handle.old_dir_name.clone();
+                self.loading_handle = None;
+
+                self.current_path = target_path.clone();
+                self.all_items = new_items;
+                self.selected_paths.clear();
+                self.cursor_idx = 0;
+                self.scroll_to_cursor = true;
+                self.sort_items();
+                self.apply_filter();
+
+                if let Some(name) = old_dir_name {
+                    if let Some(idx) = self.items.iter().position(|it| it.name == name) {
+                        self.cursor_idx = idx;
+                        self.scroll_to_cursor = true;
+                    }
+                }
+
+                Some(Ok(target_path))
+            }
+            Ok(Err(err)) => {
+                let _target_path = handle.target_path.clone();
+                self.loading_handle = None;
+                self.error_message = Some(format!("Błąd odczytu: {}", err));
+                Some(Err(err))
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => None,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                self.loading_handle = None;
+                Some(Err("Wątek przerwany".to_string()))
+            }
+        }
+    }
+
+    pub fn go_up_async(&mut self, repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>) {
+        if let Some(ref mut loc) = self.zip_location {
+            if loc.go_up() {
+                self.selected_paths.clear();
+                self.cursor_idx = 0;
+                self.scroll_to_cursor = true;
+                self.refresh();
+            } else {
+                self.exit_zip();
+            }
+            return;
+        }
+
+        if let Some(parent) = self.current_path.parent() {
+            let old_dir_name = self
+                .current_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string());
+            let parent_buf = parent.to_path_buf();
+            self.start_loading_dir(parent_buf, old_dir_name, repaint_signal);
         }
     }
 
@@ -336,33 +529,107 @@ impl PanelState {
         self.recalculate_totals();
     }
 
-    pub fn calculate_cursor_dir_size(&mut self) -> Option<u64> {
-        let item = self.items.get(self.cursor_idx)?;
-        if !item.is_dir || item.is_parent {
+    pub fn is_calculating_dir(&self, path: &Path) -> bool {
+        self.calculating_dir_sizes.contains(path)
+    }
+
+    pub fn is_calculated_dir(&self, path: &Path) -> bool {
+        self.calculated_dirs.contains(path)
+    }
+
+    pub fn has_calculating_dirs(&self) -> bool {
+        !self.calculating_dir_sizes.is_empty()
+    }
+
+    pub fn start_calculate_dir_size(
+        &mut self,
+        dir_path: PathBuf,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        if self.calculating_dir_sizes.contains(&dir_path) {
+            return;
+        }
+
+        self.calculating_dir_sizes.insert(dir_path.clone());
+        let tx = self.dir_size_tx.clone();
+        let target_path = dir_path.clone();
+
+        std::thread::spawn(move || {
+            let mut total_size: u64 = 0;
+            let mut file_count: usize = 0;
+
+            for entry in walkdir::WalkDir::new(&target_path)
+                .min_depth(1)
+                .into_iter()
+                .flatten()
+            {
+                if entry.file_type().is_file() {
+                    if let Ok(meta) = entry.metadata() {
+                        total_size = total_size.saturating_add(meta.len());
+                        file_count += 1;
+                    }
+                }
+            }
+
+            let _ = tx.send((target_path, total_size, file_count));
+            if let Some(sig) = repaint_signal {
+                sig();
+            }
+        });
+    }
+
+    pub fn poll_dir_sizes(&mut self) -> Vec<(PathBuf, u64, usize)> {
+        let mut finished = Vec::new();
+        while let Ok((path, size, file_count)) = self.dir_size_rx.try_recv() {
+            self.calculating_dir_sizes.remove(&path);
+            self.calculated_dirs.insert(path.clone());
+
+            let mut matched = false;
+            if let Some(item) = self.items.iter_mut().find(|it| it.path == path) {
+                item.size = size;
+                matched = true;
+            }
+            if let Some(item) = self.all_items.iter_mut().find(|it| it.path == path) {
+                item.size = size;
+                matched = true;
+            }
+
+            if matched {
+                self.recalculate_totals();
+                finished.push((path, size, file_count));
+            }
+        }
+        finished
+    }
+
+    pub fn space_select_and_calculate(
+        &mut self,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Option<PathBuf> {
+        let idx = self.cursor_idx;
+        let item = self.items.get(idx)?.clone();
+        if item.is_parent {
             return None;
         }
-        let dir_path = item.path.clone();
 
-        let total_size: u64 = walkdir::WalkDir::new(&dir_path)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| {
-                if e.file_type().is_file() {
-                    e.metadata().ok().map(|m| m.len())
-                } else {
-                    None
-                }
-            })
-            .sum();
+        // 1. Zaznacz / odznacz bieżący element
+        self.toggle_select(idx);
 
-        if let Some(item_mut) = self.items.get_mut(self.cursor_idx) {
-            item_mut.size = total_size;
+        // 2. Jeśli to katalog, uruchom asynchroniczne zliczanie rozmiaru w tle
+        let calc_path = if item.is_dir {
+            self.start_calculate_dir_size(item.path.clone(), repaint_signal);
+            Some(item.path)
+        } else {
+            None
+        };
+
+        // 3. Przesuń kursor w dół o 1 wiersz (jak klawisz Insert), aby natychmiast móc zaznaczać kolejne elementy
+        if idx + 1 < self.items.len() {
+            self.cursor_idx += 1;
+            self.scroll_to_cursor = true;
         }
-        if let Some(all_item) = self.all_items.iter_mut().find(|it| it.path == dir_path) {
-            all_item.size = total_size;
-        }
-        self.recalculate_totals();
-        Some(total_size)
+
+        calc_path
     }
 
     pub fn load_search_results(&mut self, results: &[crate::search::SearchResult]) {
@@ -451,14 +718,12 @@ impl PanelState {
                 total_dirs += 1;
             } else {
                 total_files += 1;
-                total_bytes += item.size;
             }
+            total_bytes += item.size;
 
             if self.selected_paths.contains(&item.path) {
                 sel_count += 1;
-                if !item.is_dir {
-                    sel_bytes += item.size;
-                }
+                sel_bytes += item.size;
             }
         }
 

@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -25,10 +26,21 @@ jobs:
       - name: Build Release Binary
         run: cargo build --release
 
-      - name: Package Windows Artifacts
+      - name: Install Inno Setup
+        run: choco install -y innosetup
+
+      - name: Build Inno Setup Installer
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          if (-not $ver) { $ver = "0.1.0" }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer\huzar_setup.iss
+
+      - name: Package Windows Portable Archive
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
+          if (-not $tag) { $tag = "latest" }
           $pkgName = "huzar-commander-$tag-windows-x64"
           New-Item -ItemType Directory -Path $pkgName
           Copy-Item target/release/huzar-commander.exe -Destination $pkgName/
@@ -37,10 +49,12 @@ jobs:
           Compress-Archive -Path $pkgName/* -DestinationPath "$pkgName.zip"
           Write-Output "PACKAGE_ZIP=$pkgName.zip" >> $env:GITHUB_ENV
 
-      - name: Upload Windows Asset
+      - name: Upload Windows Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: huzar-commander-*-windows-x64.zip
+          files: |
+            target/installer/HuzarCommander-Setup-*.exe
+            huzar-commander-*-windows-x64.zip
           generate_release_notes: true
 
   build-linux:
@@ -64,6 +78,7 @@ jobs:
       - name: Package Linux Artifacts
         run: |
           TAG="${{ github.ref_name }}"
+          if [ -z "$TAG" ]; then TAG="latest"; fi
           PKG_NAME="huzar-commander-$TAG-linux-x64"
           mkdir -p "$PKG_NAME"
           cp target/release/huzar-commander "$PKG_NAME/"

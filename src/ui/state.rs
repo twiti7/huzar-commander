@@ -292,7 +292,7 @@ pub struct FileOpsState {
     pub mask_input: String,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone, Default)]
 pub struct PropertiesDialogState {
     pub is_open: bool,
     pub name: String,
@@ -304,6 +304,8 @@ pub struct PropertiesDialogState {
     pub modified: Option<String>,
     pub readonly: bool,
     pub hidden: bool,
+    pub is_calculating: bool,
+    pub rx: Option<crossbeam_channel::Receiver<(u64, usize, usize)>>,
 }
 
 #[derive(Debug, Clone, Default)]

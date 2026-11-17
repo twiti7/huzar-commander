@@ -1,173 +1,184 @@
 # Huzar Commander
 
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#licencja)
+> **Language / Język:** [English](README.md) | [Polski](README_PL.md)
+
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust: 2021](https://img.shields.io/badge/Rust-2021%20edition-orange.svg)](https://www.rust-lang.org/)
 [![GUI: eframe/egui 0.31](https://img.shields.io/badge/GUI-eframe%2Fegui%200.31-green.svg)](https://github.com/emilk/egui)
-[![Tests: 80 passing](https://img.shields.io/badge/Tests-80%20passing-brightgreen.svg)](#testy-jednostkowe)
+[![Tests: 85 passing](https://img.shields.io/badge/Tests-85%20passing-brightgreen.svg)](#unit-and-integration-tests)
 
-Nowoczesny, dwupanelowy menedżer plików GUI w języku Rust wzorowany na Norton Commander, Total Commander i FAR Manager. Nazwa nawiązuje do polskiej husarii – dwa rozpostarte skrzydła symbolizują dwa panele, pancerz to gwarancja bezpieczeństwa pamięci Rusta, a szybkość szarży to błyskawiczne operacje I/O z telemetrią w czasie rzeczywistym.
+A modern, dual-pane orthodox GUI file manager written in pure Rust, inspired by Norton Commander, Total Commander, and FAR Manager. The name draws inspiration from the Polish Hussars (*husaria*) — the two outspread wings represent the two work panels, the armor symbolizes Rust's memory safety guarantees, and the cavalry charge speed reflects blazingly fast I/O streaming with real-time telemetry.
 
 ![Huzar Commander Screenshot](assets/screenshot.png)
 
-## Funkcjonalności
+## Features
 
-- **Układ dwupanelowy (Dual-pane):** Lewy i prawy panel z niezależną nawigacją, podświetleniem aktywnego okna i precyzyjnym obcinaniem krawędzi (panele nigdy na siebie nie nachodzą).
-- **Wybór dysków (Alt+F1 / Alt+F2):** 
-  - Klawisz `Alt+F1` otwiera okno wyboru dysku dla lewego panelu.
-  - Klawisz `Alt+F2` otwiera okno wyboru dysku dla prawego panelu.
-  - Bezpośredni wybór po naciśnięciu litery dysku (np. klawisz `C` lub `D` natychmiast zmienia dysk).
-  - Nawigacja strzałkami `Góra`/`Dół` + `Enter` lub kliknięcie myszą.
-  - Wyświetlanie etykiety woluminu (np. `Windows`, `Dane`), wolnego i całkowitego miejsca oraz wskaźnika zajętości.
-  - Przyciski `🖴 Alt+F1` oraz `🖴 Alt+F2` bezpośrednio na pasku dysków każdego panelu.
-- **Pasek dysków:** Szybkie przełączanie dysków (`[-C-]`, `[-D-]`, itp.) z podświetleniem aktywnego dysku.
-- **Tabela plików (Virtual Scrolling):** Płynne przewijanie z automatycznym śledzeniem pozycji kursora (`scroll_to_row`). Kolumny: Nazwa (elastyczna), Rozszerzenie, Rozmiar (do prawej), Data modyfikacji (do prawej).
-- **Wielobarwne kodowanie plików:**
-  - 📁 Katalogi i `[..]` na złoto/żółto
-  - 🟢 Pliki `.exe`, `.bat`, `.cmd` na jasnozielono
-  - 🟠 Archiwa `.zip`, `.rar`, `.7z` na pomarańczowo
-  - 🔵 Pliki `.rs`, `.toml`, `.txt` na błękitno
-  - 🔴 Zaznaczone pliki na czerwono (klasyka Total Commandera)
-- **Sortowanie:** Kliknięcie nagłówka kolumny (Nazwa, Rozszerzenie, Rozmiar, Data) sortuje listę, zachowując pozycję kursora na tym samym pliku.
-- **Zaznaczanie:** 
-  - Klawisz `Insert` zaznacza plik i przesuwa kursor w dół.
-  - Prawy przycisk myszy (RMB) zaznacza/odznacza plik pod kursorem.
-  - Kliknięcie w dowolne miejsce wiersza (pełny wiersz) zmienia kursor i aktywuje panel.
-  - Menu *Zaznacz*: zaznacz wszystko, odznacz wszystko, odwróć zaznaczenie.
-  - Pasek stanu na górze każdego panelu podsumowuje liczbę i rozmiar zaznaczonych elementów.
-- **Kopiowanie z telemetrią (F5):**
-  - **Prędkość dyskowa SSD:** Kopiowanie blokami 1 MB bez zbędnych narzutów.
-  - **Wykres prędkości w czasie:** Neonowy wykres liniowy w czasie rzeczywistym z dynamicznym skalowaniem szczytu.
-  - **Podwójny pasek postępu:** Postęp bieżącego pliku oraz postęp całkowity zadania.
-  - **Szacowany czas do końca (ETA):** Dokładny licznik `GG:MM:SS` wyliczany z prędkości EMA i pozostałych bajtów.
-  - **Czas trwania:** Dokładny stoper operacji.
-  - **Praca w tle (`W tle`):** Możliwość zminimalizowania okna transferu do małego paska na dole i swobodnego korzystania z całego programu podczas kopiowania!
-  - **Pokaż szczegóły:** Błyskawiczny powrót z paska do pełnego okna z wykresem.
-  - **Anuluj:** Natychmiastowe przerwanie transferu w dowolnym momencie.
-- **Kolejka operacji w tle (Background Transfer Manager):**
-  - Wielozadaniowość: nowe operacje kopiowania/przenoszenia zlecane w trakcie trwania transferu są natychmiast dynamicznie kolejkowane bez czekania na zakończenie poprzednich zadań.
-  - Agregowany czas i rozmiar: dynamiczne przeliczanie całkowitego rozmiaru kolejki i łącznego wskaźnika ETA w czasie rzeczywistym.
-  - Sterowanie kolejką: przyciski wstrzymania (`Pauza`), wznowienia (`Wznów`), natychmiastowego pomijania bieżącego zadania (`⏭ Pomiń`) dostępne w oknie transferu, w dolnym pasku oraz w oknie kolejki, a także anulowania całej kolejki.
-  - Dedykowane okno kolejki z listą zadań oczekujących i bieżącą telemetrią.
-- **Wyszukiwanie plików (Alt+F7):**
-  - Wyszukiwanie wielowątkowe bez blokowania interfejsu użytkownika.
-  - Maski plików i wzorce wieloznaczne (np. `*.rs`, `*test*`, `*.txt;*.md`).
-  - Przeszukiwanie zawartości tekstowej wewnątrz plików (z opcją ignorowania lub rozróżniania wielkości liter).
-  - Wyniki w czytelnej tabeli z podglądem trafienia, ścieżki i rozmiaru.
-  - Przyciski "Przejdź do pliku" (natychmiastowe przejście do folderu w panelu i ustawienie kursora) oraz "Podgląd (F3)".
-- **Obsługa archiwów ZIP:**
-  - Przeglądanie archiwów ZIP tak jak zwykłych katalogów (wejście klawiszem `Enter` lub dwuklikiem).
-  - Wirtualna nawigacja po podkatalogach wewnątrz archiwum i wyjście do folderu nadrzędnego (`[..]` / `Backspace`).
-  - Szybki podgląd plików wewnątrz archiwum pod klawiszem `F3`.
-  - Rozpakowywanie wybranych plików lub całego archiwum (`F5`) do przeciwnego panelu.
-- **Szybkie filtrowanie widoku plików na żywo:**
-  - Wbudowane pole filtra `🔍` bezpośrednio w nagłówku każdego panelu (skrót `Ctrl+F`).
-  - Filtrowanie w czasie rzeczywistym wg masek (`*.rs`), wielu rozszerzeń (`*.rs;*.toml`) lub podciągów znaków.
-  - Czyszczenie filtra jednym kliknięciem `✖` lub klawiszem `Esc`.
-- **Przenoszenie / Zmiana nazwy (F6):** Błyskawiczne atomowe przenoszenie na tym samym dysku lub kopiowanie z usuwaniem między różnymi woluminami.
-- **Tworzenie folderu (F7):** Okno dialogowe z polem nazwy nowego folderu.
-- **Usuwanie (F8 / Delete):** Z opcją bezpiecznego przeniesienia do systemowego Kosza.
-- **Szybki podgląd (F3):** Wbudowany podglądacz tekstowy w oknie modalnym.
-- **Edycja (F4):** Otwarcie w systemowym Notatniku (lub domyślnym edytorze).
-- **Wiersz poleceń na dole:** Uruchamianie dowolnych komend systemu operacyjnego w bieżącej ścieżce aktywnego panelu.
+- **Dual-Pane Layout (Orthodox):** Left and right panels with independent navigation, active window accent highlighting, and pixel-perfect clipping (panels never overlap).
+- **Asynchronous, Cancellable Directory Loading (`Esc`):** Non-blocking background directory scanner for network drives (SMB/UNC shares like `\\server\share`) and slow storage. If connecting or listing files takes time, the interface never freezes: an animated loading indicator with live timer and a `[ ✖ Cancel (Esc) ]` button is displayed, allowing instant cancellation and return to the previous directory at any time, while the other panel remains 100% interactive.
+- **Drive Selection (`Alt+F1` / `Alt+F2`):** 
+  - `Alt+F1` opens the drive selection dialog for the left panel.
+  - `Alt+F2` opens the drive selection dialog for the right panel.
+  - Quick selection by pressing the drive letter directly (e.g., pressing `C` or `D` instantly changes the drive).
+  - Arrow key navigation (`Up` / `Down` + `Enter`) or mouse click.
+  - Displays volume labels (e.g., `Windows`, `Data`), free and total storage, and a visual usage bar.
+  - Quick-access buttons `🖴 Alt+F1` and `🖴 Alt+F2` located directly on each panel's drive bar.
+- **Drive Bar:** Fast drive switching (`[-C-]`, `[-D-]`, etc.) with active drive indicator.
+- **File Table (Virtual Scrolling):** Smooth scrolling with automatic active cursor tracking (`scroll_to_row`). Columns: Name (flexible), Extension, Size (right-aligned), Date Modified (right-aligned).
+- **Color-Coded File Types:**
+  - 📁 Directories and `[..]` in gold/yellow
+  - 🟢 Executables (`.exe`, `.bat`, `.cmd`) in light green
+  - 🟠 Archives (`.zip`, `.rar`, `.7z`) in orange
+  - 🔵 Code and text (`.rs`, `.toml`, `.txt`) in cyan
+  - 🔴 Selected items in vivid red (classic Total Commander style)
+- **Sorting:** Clicking any column header (Name, Extension, Size, Date) sorts the list while maintaining the cursor on the currently selected item.
+- **Selection:** 
+  - `Insert` key toggles selection and moves the cursor down one row.
+  - `Space` key toggles selection and moves down; for folders, starts asynchronous background size calculation (displaying `<...>` while calculating) without freezing the UI.
+  - Right Mouse Button (RMB) toggles selection on the item under the cursor.
+  - Clicking anywhere on a row moves the cursor and activates the panel.
+  - *Select* menu: Select all, Deselect all, Invert selection, Select/Deselect by mask (`+` / `-`).
+  - Panel header status summary displays the count and total size of selected items.
+- **Copying with Real-Time Telemetry (`F5`):**
+  - **SSD Native Speed:** 1 MB buffered block copying without redundant overhead.
+  - **Real-Time Speed Graph:** Neon cyan live line graph with dynamic peak auto-scaling.
+  - **Dual Progress Bars:** Current file progress and overall task progress.
+  - **Estimated Time of Arrival (ETA):** Accurate `HH:MM:SS` countdown computed from an Exponential Moving Average (EMA) and remaining bytes.
+  - **Elapsed Time:** High-precision operation stopwatch.
+  - **Background Transfer (`Background`):** Minimize the transfer dialog into a compact bottom status bar and continue using the entire application seamlessly during file transfers!
+  - **Show Details:** Instant one-click restoration from the bottom bar back into the full telemetry modal.
+  - **Cancel:** Immediate, safe cancellation of the active operation at any time.
+- **Background Transfer Queue Manager:**
+  - Multitasking: new copy/move operations enqueued during an ongoing transfer are dynamically queued without blocking or waiting for previous tasks to finish.
+  - Aggregated Metrics: real-time recalculation of total queue size and combined overall ETA.
+  - Queue Controls: Pause (`⏸ Pause`), Resume (`▶ Resume`), Skip current task (`⏭ Skip`) in the transfer dialog, bottom status bar, or dedicated Queue Window, as well as Cancel Entire Queue.
+  - Dedicated queue management window with task list and live telemetry.
+- **File Search (`Alt+F7`):**
+  - Asynchronous, multi-threaded search without freezing the user interface.
+  - File masks and wildcard patterns (e.g., `*.rs`, `*test*`, `*.txt;*.md`).
+  - Text content search within files (with case-sensitive and case-insensitive options).
+  - Clean results table with match preview, path, and size.
+  - "Go to file" (instantly navigates the panel to the folder and selects the file) and "View (F3)" buttons.
+- **ZIP Archive Support:**
+  - Browse ZIP archives seamlessly just like regular folders (enter with `Enter` or double click).
+  - Virtual navigation through nested subdirectories and return to parent (`[..]` / `Backspace`).
+  - Quick file preview inside archives using `F3`.
+  - Extract selected files or the entire archive (`F5`) to the opposite panel.
+- **Live File Filtering:**
+  - Built-in `🔍` filter input directly in each panel header (shortcut `Ctrl+F`).
+  - Real-time filtering by mask (`*.rs`), multiple extensions (`*.rs;*.toml`), or substring match.
+  - Clear filter with a single click `✖` or `Esc` key.
+- **Move / Rename (`F6`):** Blazing fast atomic move on the same volume, or buffered copy-with-delete across different filesystems.
+- **Create Folder (`F7`):** Dialog with new directory name input.
+- **Delete (`F8` / `Delete`):** With option for safe deletion to the system Recycle Bin.
+- **Quick View (`F3`):** Modal streaming viewer (64 KB chunks) supporting Text, Hex dumper, Markdown (with Mermaid diagram rendering), and JSON/YAML with syntax highlighting and interactive tree view.
+- **Edit (`F4`):** Open in default text editor (Notepad) or configured custom editor associations.
+- **Integrated Command Line (CLI):** Execute arbitrary OS shell commands directly in the working directory of the active panel.
 
-## Klawisze skrótów
+## Keyboard Shortcuts
 
-| Klawisz | Akcja |
+| Shortcut | Action |
 |---|---|
-| `Tab` | Przełączenie aktywnego panelu (Lewy <-> Prawy) |
-| `Enter` | Wejście do katalogu / Uruchomienie skojarzonego pliku |
-| `Backspace` | Wyjście do katalogu nadrzędnego (`..`) |
-| `Strzałki Góra/Dół` | Poruszanie kursorem z auto-przewijaniem widoku |
-| `PageUp / PageDown` | Przeskok o 15 wierszy w górę / w dół |
-| `Home / End` | Przeskok na początek / koniec listy |
-| `Insert` | Zaznaczenie pliku i przejście o 1 wiersz niżej |
-| `Prawy Przycisk Myszy` | Zaznaczenie / odznaczenie pliku pod kursorem |
-| `Kliknięcie w wiersz` | Ustawienie kursora na pliku i aktywacja panelu |
-| `Dwuklik Lewy Przycisk` | Wejście do katalogu / Otwarcie pliku |
-| `F1` | Pomoc / O programie (informacje o wersji, technologiach i skrótach) |
-| `F3` | Szybki podgląd pliku |
-| `F4` | Edycja pliku w Notatniku |
-| `F5` | Kopiowanie (z wykresem, ETA i opcją pracy w tle) |
-| `F6` | Przenoszenie / Zmiana nazwy |
-| `F7` | Tworzenie nowego folderu |
-| `F8` lub `Delete` | Usuwanie plików / folderów |
-| `Alt+F1` | Wybór dysku lewego panelu (okno dysków) |
-| `Alt+F2` | Wybór dysku prawego panelu (okno dysków) |
-| `Alt+F7` | Wyszukiwanie plików (po nazwie i zawartości) |
-| `Ctrl+F` | Szybkie filtrowanie plików w aktywnym panelu |
-| `Esc` | Wyczyszczenie filtra / Zamknięcie okna dialogowego |
-| `Alt+F4` | Wyjście z programu |
+| `Tab` | Switch active panel (Left <-> Right) |
+| `Enter` | Enter directory / Open associated file / Enter ZIP archive |
+| `Backspace` | Navigate to parent directory (`..`) |
+| `Up / Down Arrows` | Move cursor with automatic scroll tracking |
+| `PageUp / PageDown` | Jump 15 rows up / down |
+| `Home / End` | Jump to beginning / end of file list |
+| `Insert` | Select item and move cursor 1 row down |
+| `Space` | Select item / Calculate folder size in background and move down |
+| `Right Mouse Button` | Select / deselect item under cursor |
+| `Row Click` | Set cursor on item and activate panel |
+| `Double Click (LMB)` | Enter directory / Open file |
+| `F1` | Help / About (version, technologies, shortcuts, and licenses) |
+| `F3` | Quick view file (Text / Hex / Markdown / JSON / YAML) |
+| `F4` | Edit file in configured editor |
+| `F5` | Copy (with speed graph, ETA, and background queue option) |
+| `F6` | Move / Rename |
+| `F7` | Create new directory |
+| `F8` or `Delete` | Delete files / directories (optional Recycle Bin) |
+| `Alt+F1` | Select drive for left panel (drive dialog) |
+| `Alt+F2` | Select drive for right panel (drive dialog) |
+| `Alt+F7` | Search files (by name and content) |
+| `Ctrl+F` | Quick filter files in active panel |
+| `Esc` | Clear filter / Close active modal dialog |
+| `Alt+F4` | Exit application |
 
-## Uruchamianie i Kompilacja
+## Running and Building
 
 ### Windows
-W terminalu PowerShell w folderze projektu:
+In a PowerShell terminal in the project directory:
 
-* **Wersja deweloperska (Debug):**
+* **Development build (Debug):**
   ```powershell
   .\run.ps1
-  # lub:
+  # or:
   cargo run
   ```
 
-* **Budowanie wersji produkcyjnej (Release):**
+* **Production build (Release):**
   ```powershell
   .\build_release.ps1
-  # lub bezpośrednio przez cargo:
+  # or directly via Cargo:
   cargo build --release
   ```
-  Skompilowany plik `.exe` znajdziesz w:
+  The compiled `.exe` executable will be placed in:
   `target\release\huzar-commander.exe`
 
-* **Uruchomienie wersji Release:**
+* **Run Release version:**
   ```powershell
   .\run_release.ps1
-  # lub:
+  # or:
   cargo run --release
   ```
 
+* **Generate Universal Windows Installer (.exe):**
+  ```powershell
+  .\build_installer.ps1
+  ```
+  Produces `target\installer\HuzarCommander-Setup-v0.1.0.exe` (Inno Setup) with bilingual support (PL/EN), desktop & start menu shortcuts, uninstaller in Windows Settings, and Windows Explorer context menu integration (*"Open in Huzar Commander"*).
+
 ### Linux / Ubuntu / Debian
-Przed pierwszym uruchomieniem należy upewnić się, że zainstalowane są standardowe biblioteki okienkowe (X11 / Wayland / OpenGL):
+Before running for the first time, ensure the standard windowing and rendering development packages (X11 / Wayland / OpenGL) are installed:
 ```bash
 sudo apt update
 sudo apt install -y build-essential pkg-config libxkbcommon-dev libgl1-mesa-dev libfontconfig1-dev
 ```
-Uruchomienie:
+Run:
 ```bash
 chmod +x ./run.sh
 ./run.sh
-# lub bezpośrednio:
+# or directly:
 cargo run
 ```
 
-Na Linuksie menedżer automatycznie wykrywa:
-- Główny system plików `/` (skrót `[-R-]` / klawisz `R` lub `/`),
-- Folder użytkownika `$HOME` (skrót `[-H-]` / klawisz `H`),
-- Wszystkie fizyczne i sieciowe punkty montowania z `/proc/mounts`, `/mnt` oraz `/media` (ze skrótami literowymi `[-A-]`, `[-B-]`, itp.).
-- Pojemności i wolne miejsce odczytywane są standardowym wywołaniem POSIX `statvfs`.
+On Linux, the file manager automatically detects:
+- Root filesystem `/` (shortcut `[-R-]` / key `R` or `/`),
+- User home directory `$HOME` (shortcut `[-H-]` / key `H`),
+- All physical and network mount points from `/proc/mounts`, `/mnt`, and `/media` (with drive letter shortcuts `[-A-]`, `[-B-]`, etc.).
+- Capacities and free disk space are queried via standard POSIX `statvfs`.
 
-## Testy jednostkowe i integracyjne
+## Unit and Integration Tests
 
-Projekt posiada rozbudowany zestaw **80 zautomatyzowanych testów** (15 modułów testowych w katalogu `tests/`) pokrywających:
-- Parsowanie i atrybuty plików (`fs_item`),
-- Sortowanie dwupanelowe z zachowaniem aktywnej pozycji kursora (`panel`),
-- Operacje zaznaczania (`toggle_select`, `select_all`, `deselect_all`, `invert_selection`) oraz przeliczanie sumarycznych rozmiarów (`panel`),
-- Wykrywanie dysków systemowych i odczyt pojemności (`drives`),
-- Asynchroniczny silnik I/O: tworzenie katalogów, kopiowanie i przenoszenie plików, obsługa kolejki zadań (`worker`),
-- Archiwa ZIP: podgląd struktury wirtualnej, kompresja i dekompresja (`zip_support`),
-- Moduł internacjonalizacji i18n: parzystość kluczy PL/EN, detekcja języka i formatowanie (`i18n`),
-- Silniki podglądu: Markdown, JSON/YAML, diagramy Mermaid, Hex dumper oraz strumieniowy bufor 64 KB (`viewer`).
+The project features a comprehensive suite of **86 automated tests** (across 15 test modules in the `tests/` directory) covering:
+- File metadata parsing and attributes (`fs_item`),
+- Dual-panel sorting, selection, and asynchronous cancellable directory loading (`panel`),
+- Selection operations (`toggle_select`, `select_all`, `deselect_all`, `invert_selection`) and aggregated size calculation (`panel`),
+- System drive detection and volume capacity queries (`drives`),
+- Asynchronous I/O engine: directory creation, file copying and moving, task queue handling (`worker`),
+- ZIP archives: virtual tree browsing, compression, and decompression (`zip_support`),
+- Internationalization (i18n): PL/EN key parity, language detection, and formatting (`i18n`),
+- Viewer engines: Markdown, JSON/YAML, Mermaid diagrams, Hex dumper, and 64 KB streaming buffer (`viewer`).
 
-Uruchomienie testów:
+Running tests:
 ```powershell
 cargo test
 ```
 
-## Licencja
+## License
 
-Projekt jest udostępniany na zasadach podwójnej licencji (Dual License), standardowej w ekosystemie Rust:
+This project is licensed under a dual license, standard in the Rust ecosystem:
 
 * **MIT License** ([LICENSE-MIT](LICENSE-MIT))
 * **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
 
-Użytkownik może wybrać dowolną z tych licencji według własnych preferencji.
+You may choose either license at your discretion.

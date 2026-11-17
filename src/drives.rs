@@ -29,6 +29,9 @@ extern "system" {
         lpFileSystemNameBuffer: *mut u16,
         nFileSystemNameSize: u32,
     ) -> i32;
+
+    fn GetLogicalDrives() -> u32;
+    fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
 }
 
 #[cfg(target_os = "windows")]
@@ -254,22 +257,50 @@ pub fn scan_drives() -> Vec<DriveInfo> {
 
     #[cfg(target_os = "windows")]
     {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        let mask = unsafe { GetLogicalDrives() };
         for c in b'A'..=b'Z' {
+            let bit = (c - b'A') as u32;
+            if (mask & (1 << bit)) == 0 {
+                continue;
+            }
+
             let letter = c as char;
             let drive_str = format!("{}:\\", letter);
             let drive_path = PathBuf::from(&drive_str);
-            if drive_path.exists() {
-                let (total, free) = get_drive_space(&drive_str);
-                let vol_label = get_volume_label(&drive_str);
-                drives.push(DriveInfo {
-                    letter,
-                    path: drive_path,
-                    label: format!("[-{}-]", letter),
-                    volume_label: vol_label,
-                    total_space: total,
-                    free_space: free,
-                });
+
+            let mut wide: Vec<u16> = OsStr::new(&drive_str).encode_wide().collect();
+            wide.push(0);
+
+            let drive_type = unsafe { GetDriveTypeW(wide.as_ptr()) };
+            // DRIVE_NO_ROOT_DIR = 1, DRIVE_UNKNOWN = 0
+            if drive_type <= 1 {
+                continue;
             }
+
+            let is_remote = drive_type == 4; // DRIVE_REMOTE
+            let (total, free) = get_drive_space(&drive_str);
+            let vol_label = if is_remote {
+                let label = get_volume_label(&drive_str);
+                if label == "Dysk lokalny" {
+                    "Dysk sieciowy".to_string()
+                } else {
+                    label
+                }
+            } else {
+                get_volume_label(&drive_str)
+            };
+
+            drives.push(DriveInfo {
+                letter,
+                path: drive_path,
+                label: format!("[-{}-]", letter),
+                volume_label: vol_label,
+                total_space: total,
+                free_space: free,
+            });
         }
     }
 

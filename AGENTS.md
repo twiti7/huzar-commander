@@ -204,7 +204,7 @@ if self.progress.is_open || self.search.handle.is_some() {
 Zapewnia to 60 FPS dla neonowego wykresu prędkości oraz płynną aktualizację liczników bajtów i ETA.
 
 ### Reguła 5: Zachowanie testów jednostkowych i integracyjnych
-Projekt posiada 80 testów jednostkowych i integracyjnych w katalogu `tests/` (15 plików testowych).
+Projekt posiada 85 testów jednostkowych i integracyjnych w katalogu `tests/` (15 plików testowych).
 Przed zakończeniem zadania agent **musi** uruchomić `cargo test` i upewnić się, że wszystkie testy przechodzą pomyślnie.
 
 ---
@@ -270,6 +270,6 @@ Projekt jest w pełni kompatybilny z Linuksem (X11 oraz Wayland):
 ## 7. Status Projektu i Metryki Jakości
 
 - **Stan kompilacji:** 0 błędów, 0 ostrzeżeń (`cargo check` / `cargo build` clean, 0 ostrzeżeń clippy).
-- **Stan testów:** 80/80 testów jednostkowych i integracyjnych w katalogu `tests/` przechodzi pomyślnie (15 plików testowych).
+- **Stan testów:** 86/86 testów jednostkowych i integracyjnych w katalogu `tests/` przechodzi pomyślnie (15 plików testowych).
 - **Branding & Ikona:** Ikona skrzydeł husarskich (`assets/huzar_icon.png`, `assets/huzar_icon.ico`) zintegrowana w nagłówku PE Windows (`build.rs`), oknie `eframe::NativeOptions`, oknie F1 „O programie” oraz prawym rogu górnego menu.
 - **Wydajność I/O:** Prędkość kopiowania na poziomie dysku SSD (bufor 1 MB), responsywność interfejsu GUI stabilne 60 FPS, brak alokacji RAM przy podglądzie dużych plików wielogigabajtowych.

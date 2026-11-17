@@ -55,7 +55,11 @@
     "clear_filter": "Clear filter (Esc)",
     "open_drives": "Open drive list ({key})",
     "status_summary": "Selected: {sel_count} ({sel_bytes}) | Total: {total_count} ({total_bytes})",
-    "items_count": "{filtered}/{total} items"
+    "items_count": "{filtered}/{total} items",
+    "loading_title": "Connecting to resource / loading directory...",
+    "loading_cancel": "✖ Cancel (Esc)",
+    "loading_tip": "You can continue working in the other panel.",
+    "loading_cancelled": "Directory loading cancelled"
   },
   "dialogs": {
     "btn_ok": "OK",
@@ -100,6 +104,12 @@
     "props_type_file": "Regular file",
     "props_modified": "Modified:",
     "props_readonly": "Read-only",
+    "props_calculating": "calculating...",
+    "props_contains": "Contains:",
+    "props_contains_fmt": "{files} files, {dirs} folders",
+    "props_attributes": "Attributes:",
+    "props_hidden": "Hidden",
+    "props_normal": "Normal (A)",
     "drive_title_left": "Select drive — left panel",
     "drive_title_right": "Select drive — right panel",
     "drive_free_total": "{free} free of {total}",
