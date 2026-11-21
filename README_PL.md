@@ -135,7 +135,7 @@ W terminalu PowerShell w folderze projektu:
   ```powershell
   .\build_installer.ps1
   ```
-  Generuje gotowy plik instalatora `target\installer\HuzarCommander-Setup-v0.1.0.exe` (Inno Setup) z wyborem języka (PL/EN), skrótami na Pulpicie i w Menu Start, deinstalatorem w Ustawieniach Windows oraz integracją z menu kontekstowym Eksploratora Windows (*„Otwórz w programie Huzar Commander”*).
+  Generuje gotowy plik instalatora `target\installer\HuzarCommander-Setup-v0.2.0.exe` (Inno Setup) z wyborem języka (PL/EN), skrótami na Pulpicie i w Menu Start, deinstalatorem w Ustawieniach Windows oraz integracją z menu kontekstowym Eksploratora Windows (*„Otwórz w programie Huzar Commander”*).
 
 ### Linux / Ubuntu / Debian
 Przed pierwszym uruchomieniem należy upewnić się, że zainstalowane są standardowe biblioteki okienkowe (X11 / Wayland / OpenGL):

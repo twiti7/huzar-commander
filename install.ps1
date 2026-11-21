@@ -134,7 +134,7 @@ $UninstallScriptDest = Join-Path $InstallDir "uninstall.ps1"
 Copy-Item -Path (Join-Path $ScriptDir "uninstall.ps1") -Destination $UninstallScriptDest -Force
 
 Set-ItemProperty -Path $UninstallRegKey -Name "DisplayName" -Value "Huzar Commander"
-Set-ItemProperty -Path $UninstallRegKey -Name "DisplayVersion" -Value "0.1.0"
+Set-ItemProperty -Path $UninstallRegKey -Name "DisplayVersion" -Value "0.2.0"
 Set-ItemProperty -Path $UninstallRegKey -Name "Publisher" -Value "Huzar Commander Team"
 Set-ItemProperty -Path $UninstallRegKey -Name "InstallLocation" -Value $InstallDir
 Set-ItemProperty -Path $UninstallRegKey -Name "DisplayIcon" -Value $InstalledIcon

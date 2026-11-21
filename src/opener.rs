@@ -1,6 +1,27 @@
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case, clippy::upper_case_acronyms)]
+struct SHELLEXECUTEINFOW {
+    cbSize: u32,
+    fMask: u32,
+    hwnd: *mut std::ffi::c_void,
+    lpVerb: *const u16,
+    lpFile: *const u16,
+    lpParameters: *const u16,
+    lpDirectory: *const u16,
+    nShow: i32,
+    hInstApp: *mut std::ffi::c_void,
+    lpIDList: *mut std::ffi::c_void,
+    lpClass: *const u16,
+    hkeyClass: *mut std::ffi::c_void,
+    dwHotKey: u32,
+    hIconOrMonitor: *mut std::ffi::c_void,
+    hProcess: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
 #[link(name = "shell32")]
 extern "system" {
     fn ShellExecuteW(
@@ -11,6 +32,8 @@ extern "system" {
         lp_directory: *const u16,
         n_show_cmd: i32,
     ) -> isize;
+
+    fn ShellExecuteExW(p_exec_info: *mut SHELLEXECUTEINFOW) -> i32;
 }
 
 /// Otwiera plik w systemowym skojarzonym programie (np. odtwarzacz wideo dla .mp4/.mkv,
@@ -472,6 +495,270 @@ fn format_shell_error(code: isize, path: &Path) -> String {
         31 => format!("Brak skojarzonego programu dla pliku '{}'. Skojarz program w Windows.", name),
         32 => "Nie znaleziono wymaganej biblioteki DLL".to_string(),
         _ => format!("Nie udało się uruchomić '{}' (kod błędu: {})", name, code),
+    }
+}
+
+/// Sprawdza, czy plik jest plikiem wykonywalnym systemu Windows (.exe, .bat, .cmd, .msi).
+pub fn is_executable_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| {
+            ext.eq_ignore_ascii_case("exe")
+                || ext.eq_ignore_ascii_case("bat")
+                || ext.eq_ignore_ascii_case("cmd")
+                || ext.eq_ignore_ascii_case("msi")
+        })
+        .unwrap_or(false)
+}
+
+/// Generuje niekolidującą nazwę pliku w katalogu `dir` (np. `Nowy dokument tekstowy.txt`,
+/// `Nowy dokument tekstowy (2).txt`, itd.).
+pub fn generate_non_colliding_file_name(dir: &Path, base_name: &str, ext: &str) -> PathBuf {
+    let clean_ext = ext.trim_start_matches('.').trim();
+    let make_name = |suffix: Option<usize>| -> String {
+        match (suffix, clean_ext.is_empty()) {
+            (None, true) => base_name.to_string(),
+            (None, false) => format!("{}.{}", base_name, clean_ext),
+            (Some(n), true) => format!("{} ({})", base_name, n),
+            (Some(n), false) => format!("{} ({}).{}", base_name, n, clean_ext),
+        }
+    };
+
+    let first = dir.join(make_name(None));
+    if !first.exists() {
+        return first;
+    }
+
+    let mut counter = 2usize;
+    loop {
+        let candidate = dir.join(make_name(Some(counter)));
+        if !candidate.exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+/// Otwiera systemowe okno wyboru programu ("Otwórz za pomocą...").
+pub fn open_with_dialog(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("Plik '{}' nie istnieje", path.display()));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let wide_dir: Option<Vec<u16>> = path
+            .parent()
+            .map(|p| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect());
+        let dir_ptr = wide_dir.as_ref().map(|v| v.as_ptr()).unwrap_or(ptr::null());
+        let op_openas: Vec<u16> = OsStr::new("openas")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let res = unsafe {
+            ShellExecuteW(
+                ptr::null_mut(),
+                op_openas.as_ptr(),
+                wide_path.as_ptr(),
+                ptr::null(),
+                dir_ptr,
+                1,
+            )
+        };
+        if res > 32 {
+            return Ok(());
+        }
+
+        std::process::Command::new("rundll32.exe")
+            .arg("shell32.dll,OpenAs_RunDLL")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Nie udało się otworzyć okna 'Otwórz za pomocą': {}", e))
+    }
+
+    #[cfg(not(windows))]
+    {
+        open::that(path).map_err(|e| format!("Błąd otwierania pliku: {}", e))
+    }
+}
+
+/// Uruchamia program lub skrypt jako administrator (UAC na Windows).
+pub fn run_as_administrator(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("Plik '{}' nie istnieje", path.display()));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let wide_dir: Option<Vec<u16>> = path
+            .parent()
+            .map(|p| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect());
+        let dir_ptr = wide_dir.as_ref().map(|v| v.as_ptr()).unwrap_or(ptr::null());
+        let op_runas: Vec<u16> = OsStr::new("runas")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let res = unsafe {
+            ShellExecuteW(
+                ptr::null_mut(),
+                op_runas.as_ptr(),
+                wide_path.as_ptr(),
+                ptr::null(),
+                dir_ptr,
+                1,
+            )
+        };
+        if res > 32 {
+            Ok(())
+        } else {
+            Err(format_shell_error(res, path))
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err("Run as administrator is only supported on Windows".to_string())
+    }
+}
+
+/// Otwiera folder w Eksploratorze Windows (lub zaznacza wskazany plik/folder).
+pub fn show_in_explorer(path: &Path, select_item: bool) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("Ścieżka '{}' nie istnieje", path.display()));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if select_item {
+            let cleaned = path
+                .to_string_lossy()
+                .replace('/', "\\")
+                .replace('"', "");
+            let arg = format!("/select,\"{}\"", cleaned);
+            std::process::Command::new("explorer.exe")
+                .raw_arg(arg)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("Nie można uruchomić Eksploratora Windows: {}", e))
+        } else {
+            std::process::Command::new("explorer.exe")
+                .arg(path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("Nie można uruchomić Eksploratora Windows: {}", e))
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let target = if select_item && !path.is_dir() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        open::that(target).map_err(|e| format!("Błąd otwierania menedżera plików: {}", e))
+    }
+}
+
+/// Otwiera okno terminala w wybranym katalogu.
+pub fn open_terminal(dir: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if std::process::Command::new("wt.exe")
+            .arg("-d")
+            .arg(dir)
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+        std::process::Command::new("cmd.exe")
+            .current_dir(dir)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Nie można uruchomić terminala: {}", e))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let term = std::env::var("TERMINAL").unwrap_or_else(|_| "x-terminal-emulator".to_string());
+        for prog in [term.as_str(), "gnome-terminal", "konsole", "xterm"] {
+            if std::process::Command::new(prog).current_dir(dir).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        Err("Nie znaleziono kompatybilnego emulatora terminala".to_string())
+    }
+}
+
+/// Otwiera natywne okno Właściwości systemu Windows dla pliku lub folderu.
+pub fn open_system_properties(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("Ścieżka '{}' nie istnieje", path.display()));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+
+        const SEE_MASK_INVOKEIDLIST: u32 = 0x0000_000C;
+        const SW_SHOW: i32 = 5;
+
+        let wide_verb: Vec<u16> = OsStr::new("properties")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+        info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        info.fMask = SEE_MASK_INVOKEIDLIST;
+        info.hwnd = ptr::null_mut();
+        info.lpVerb = wide_verb.as_ptr();
+        info.lpFile = wide_path.as_ptr();
+        info.lpParameters = ptr::null();
+        info.lpDirectory = ptr::null();
+        info.nShow = SW_SHOW;
+
+        let ok = unsafe { ShellExecuteExW(&mut info) };
+        if ok != 0 {
+            Ok(())
+        } else {
+            Err("Nie udało się otworzyć systemowego okna właściwości".to_string())
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err("System properties dialog is only supported on Windows".to_string())
     }
 }
 

@@ -135,7 +135,7 @@ In a PowerShell terminal in the project directory:
   ```powershell
   .\build_installer.ps1
   ```
-  Produces `target\installer\HuzarCommander-Setup-v0.1.0.exe` (Inno Setup) with bilingual support (PL/EN), desktop & start menu shortcuts, uninstaller in Windows Settings, and Windows Explorer context menu integration (*"Open in Huzar Commander"*).
+  Produces `target\installer\HuzarCommander-Setup-v0.2.0.exe` (Inno Setup) with bilingual support (PL/EN), desktop & start menu shortcuts, uninstaller in Windows Settings, and Windows Explorer context menu integration (*"Open in Huzar Commander"*).
 
 ### Linux / Ubuntu / Debian
 Before running for the first time, ensure the standard windowing and rendering development packages (X11 / Wayland / OpenGL) are installed:

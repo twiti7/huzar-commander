@@ -1,7 +1,9 @@
+pub mod context_menu;
 pub mod dialog_config;
 pub mod dialog_queue;
 pub mod dialog_search;
 pub mod file_dialogs;
+pub mod fonts;
 pub mod markdown_viewer;
 pub mod menu_bars;
 pub mod mermaid_layout;

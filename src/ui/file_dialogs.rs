@@ -12,6 +12,7 @@ pub enum FileOpsAction {
     EnqueueCommand(WorkerCommand),
     EnqueueCommandWithBackground(WorkerCommand),
     CreateDir { path: PathBuf, name: String },
+    CreateFile { path: PathBuf, name: String },
     StatusMessage(String),
 }
 
@@ -95,6 +96,50 @@ pub fn render_mkdir_dialog(
                 }
                 if ui.button(i18n.t("dialogs.btn_cancel")).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                     state.show_mkdir = false;
+                }
+            });
+        });
+
+    action
+}
+
+pub fn render_new_file_dialog(
+    ctx: &egui::Context,
+    state: &mut FileOpsState,
+    active_dir: &Path,
+    i18n: &I18n,
+) -> Option<FileOpsAction> {
+    if !state.show_new_file {
+        return None;
+    }
+
+    let mut action = None;
+
+    egui::Window::new(i18n.t("dialogs.new_file_title"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(i18n.t("dialogs.new_file_prompt"));
+            let text_edit = ui.text_edit_singleline(&mut state.new_file_input);
+            text_edit.request_focus();
+
+            ui.horizontal(|ui| {
+                let name = state.new_file_input.trim().to_string();
+                let can_create = !name.is_empty();
+                if (ui.add_enabled(can_create, egui::Button::new(i18n.t("dialogs.new_file_create"))).clicked()
+                    || ui.input(|i| i.key_pressed(Key::Enter)))
+                    && can_create
+                {
+                    let new_file_path = active_dir.join(&name);
+                    action = Some(FileOpsAction::CreateFile {
+                        path: new_file_path,
+                        name,
+                    });
+                    state.show_new_file = false;
+                }
+                if ui.button(i18n.t("dialogs.btn_cancel")).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    state.show_new_file = false;
                 }
             });
         });
@@ -689,7 +734,7 @@ pub fn render_about_dialog(ctx: &egui::Context, state: &mut AboutDialogState, i1
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Huzar Commander").size(19.0).strong().color(Color32::from_rgb(0, 190, 255)));
-                        ui.label(RichText::new(format!("{} 0.1.0", i18n.t("dialogs.about_version"))).size(13.0).color(Color32::from_rgb(150, 175, 210)));
+                        ui.label(RichText::new(format!("{} {}", i18n.t("dialogs.about_version"), env!("CARGO_PKG_VERSION"))).size(13.0).color(Color32::from_rgb(150, 175, 210)));
                     });
                     ui.label(
                         RichText::new(i18n.t("dialogs.about_author"))
