@@ -5,7 +5,7 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust: 2021](https://img.shields.io/badge/Rust-2021%20edition-orange.svg)](https://www.rust-lang.org/)
 [![GUI: eframe/egui 0.31](https://img.shields.io/badge/GUI-eframe%2Fegui%200.31-green.svg)](https://github.com/emilk/egui)
-[![Tests: 85 passing](https://img.shields.io/badge/Tests-85%20passing-brightgreen.svg)](#unit-and-integration-tests)
+[![Tests: 94 passing](https://img.shields.io/badge/Tests-94%20passing-brightgreen.svg)](#unit-and-integration-tests)
 
 A modern, dual-pane orthodox GUI file manager written in pure Rust, inspired by Norton Commander, Total Commander, and FAR Manager. The name draws inspiration from the Polish Hussars (*husaria*) — the two outspread wings represent the two work panels, the armor symbolizes Rust's memory safety guarantees, and the cavalry charge speed reflects blazingly fast I/O streaming with real-time telemetry.
 
@@ -30,14 +30,19 @@ A modern, dual-pane orthodox GUI file manager written in pure Rust, inspired by 
   - 🟠 Archives (`.zip`, `.rar`, `.7z`) in orange
   - 🔵 Code and text (`.rs`, `.toml`, `.txt`) in cyan
   - 🔴 Selected items in vivid red (classic Total Commander style)
-- **Sorting:** Clicking any column header (Name, Extension, Size, Date) sorts the list while maintaining the cursor on the currently selected item.
+- **Sorting:** Clicking any column header (Name, Extension, Size, Date) or using the right-click `Sort by ▸` submenu sorts the list while maintaining the cursor on the currently selected item, with cross-platform bundled and system symbol font fallbacks.
 - **Selection:** 
   - `Insert` key toggles selection and moves the cursor down one row.
   - `Space` key toggles selection and moves down; for folders, starts asynchronous background size calculation (displaying `<...>` while calculating) without freezing the UI.
-  - Right Mouse Button (RMB) toggles selection on the item under the cursor.
+  - `Ctrl+LMB` toggles selection on an individual item; `Shift+LMB` selects a range of items; `Ctrl+A` selects all items.
   - Clicking anywhere on a row moves the cursor and activates the panel.
   - *Select* menu: Select all, Deselect all, Invert selection, Select/Deselect by mask (`+` / `-`).
   - Panel header status summary displays the count and total size of selected items.
+- **Windows Explorer-Style Context Menu (RMB) & System Clipboard:**
+  - Context-sensitive right-click menus for files, folders, ZIP archives, and empty panel background.
+  - Explorer actions: Open, Run as administrator (for Windows executables), Open with..., View (`F3`), Edit (`F4`), Cut (`Ctrl+X`), Copy (`Ctrl+C`), Paste (`Ctrl+V`), Copy as path, Copy/Move to other panel (`F5`/`F6`), Extract here / to folder (for `.zip`), Compress to ZIP (`Alt+F5`), Rename (`F2`), Delete (`Del`/`F8`), Open in Terminal, Show/Open in Explorer, Huzar Properties (`Alt+Enter`), and native Windows Properties.
+  - Cascading submenus: `Sort by ▸` (column and ascending/descending order) and `New ▸` (Folder `F7`, Text Document `.txt` with immediate rename, New file...).
+  - Full Windows `CF_HDROP` (`Preferred DropEffect`) clipboard interoperability — copy or cut files in Huzar Commander and paste in Windows Explorer (and vice versa), with dimmed visual feedback for cut items.
 - **Copying with Real-Time Telemetry (`F5`):**
   - **SSD Native Speed:** 1 MB buffered block copying without redundant overhead.
   - **Real-Time Speed Graph:** Neon cyan live line graph with dynamic peak auto-scaling.
@@ -67,14 +72,16 @@ A modern, dual-pane orthodox GUI file manager written in pure Rust, inspired by 
   - Built-in `🔍` filter input directly in each panel header (shortcut `Ctrl+F`).
   - Real-time filtering by mask (`*.rs`), multiple extensions (`*.rs;*.toml`), or substring match.
   - Clear filter with a single click `✖` or `Esc` key.
-- **Move / Rename (`F6`):** Blazing fast atomic move on the same volume, or buffered copy-with-delete across different filesystems.
-- **Create Folder (`F7`):** Dialog with new directory name input.
+- **Move (`F6`) & Rename (`F2` / `Shift+F6`):** Blazing fast atomic move on the same volume, buffered copy-with-delete across different filesystems, and dedicated rename dialog.
+- **Create Folder (`F7`) & New File:** Dialogs for creating new folders (`F7`) or custom files, plus quick `.txt` document creation from the context menu.
 - **Delete (`F8` / `Delete`):** With option for safe deletion to the system Recycle Bin.
+- **Properties (`Alt+Enter`):** Detailed item properties modal with asynchronous background folder size and file/directory count calculation, plus native Windows Properties access from the context menu.
 - **Quick View (`F3`):** Modal streaming viewer (64 KB chunks) supporting Text, Hex dumper, Markdown (with Mermaid diagram rendering), and JSON/YAML with syntax highlighting and interactive tree view.
 - **Edit (`F4`):** Open in default text editor (Notepad) or configured custom editor associations.
+- **Bilingual UI (i18n — PL / EN):** Automatic OS language detection with runtime switching between Polish and English.
 - **Integrated Command Line (CLI):** Execute arbitrary OS shell commands directly in the working directory of the active panel.
 
-## Keyboard Shortcuts
+## Keyboard & Mouse Shortcuts
 
 | Shortcut | Action |
 |---|---|
@@ -86,21 +93,32 @@ A modern, dual-pane orthodox GUI file manager written in pure Rust, inspired by 
 | `Home / End` | Jump to beginning / end of file list |
 | `Insert` | Select item and move cursor 1 row down |
 | `Space` | Select item / Calculate folder size in background and move down |
-| `Right Mouse Button` | Select / deselect item under cursor |
+| `Right Mouse Button` | Open Windows Explorer-style context menu (on item or panel background) |
+| `Ctrl+LMB` | Toggle selection of clicked item |
+| `Shift+LMB` | Select range of items |
 | `Row Click` | Set cursor on item and activate panel |
 | `Double Click (LMB)` | Enter directory / Open file |
+| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste files via system clipboard (`CF_HDROP` on Windows) |
+| `Ctrl+A` | Select all items in active panel |
+| `+` / `-` | Select / deselect items by mask |
 | `F1` | Help / About (version, technologies, shortcuts, and licenses) |
+| `F2` or `Shift+F6` | Rename selected file or directory |
 | `F3` | Quick view file (Text / Hex / Markdown / JSON / YAML) |
 | `F4` | Edit file in configured editor |
 | `F5` | Copy (with speed graph, ETA, and background queue option) |
-| `F6` | Move / Rename |
+| `F6` | Move |
 | `F7` | Create new directory |
 | `F8` or `Delete` | Delete files / directories (optional Recycle Bin) |
 | `Alt+F1` | Select drive for left panel (drive dialog) |
 | `Alt+F2` | Select drive for right panel (drive dialog) |
+| `Alt+F5` | Pack selected items to ZIP archive |
 | `Alt+F7` | Search files (by name and content) |
+| `Alt+Enter` | Show item properties |
 | `Ctrl+F` | Quick filter files in active panel |
-| `Esc` | Clear filter / Close active modal dialog |
+| `Ctrl+H` | Show / hide hidden files |
+| `Ctrl+R` | Refresh panels |
+| `Ctrl+U` | Swap left and right panel paths |
+| `Esc` | Clear filter / Close context menu or active modal dialog |
 | `Alt+F4` | Exit application |
 
 ## Running and Building
@@ -159,10 +177,12 @@ On Linux, the file manager automatically detects:
 
 ## Unit and Integration Tests
 
-The project features a comprehensive suite of **86 automated tests** (across 15 test modules in the `tests/` directory) covering:
+The project features a comprehensive suite of **94 automated tests** (across 17 test modules in the `tests/` directory) covering:
 - File metadata parsing and attributes (`fs_item`),
-- Dual-panel sorting, selection, and asynchronous cancellable directory loading (`panel`),
-- Selection operations (`toggle_select`, `select_all`, `deselect_all`, `invert_selection`) and aggregated size calculation (`panel`),
+- Dual-panel sorting, range/batch selection, and asynchronous cancellable directory loading (`panel`),
+- Selection operations (`toggle_select`, `select_range`, `select_all`, `deselect_all`, `invert_selection`) and aggregated size calculation (`panel`),
+- File clipboard `CF_HDROP` UTF-16 payload encoding/decoding and in-memory clipboard operations (`clipboard`),
+- Context menu state lifecycle, hit-testing, executable detection, non-colliding file naming, and bundled font glyph verification (`context_menu`),
 - System drive detection and volume capacity queries (`drives`),
 - Asynchronous I/O engine: directory creation, file copying and moving, task queue handling (`worker`),
 - ZIP archives: virtual tree browsing, compression, and decompression (`zip_support`),
