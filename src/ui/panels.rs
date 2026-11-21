@@ -15,6 +15,11 @@ pub enum PanelAction {
     ChangeDir(PanelSide, std::path::PathBuf),
     CancelLoading(PanelSide),
     GoUp(PanelSide),
+    OpenContextMenu {
+        side: PanelSide,
+        pos: egui::Pos2,
+        row_idx: Option<usize>,
+    },
 }
 
 pub fn sort_indicator(current: SortColumn, target: SortColumn, order: SortOrder) -> &'static str {
@@ -28,6 +33,7 @@ pub fn sort_indicator(current: SortColumn, target: SortColumn, order: SortOrder)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_panel(
     ui: &mut egui::Ui,
     panel: &mut PanelState,
@@ -35,6 +41,8 @@ pub fn render_panel(
     is_active: bool,
     drives: &[DriveInfo],
     i18n: &I18n,
+    suppress_pointer: bool,
+    cut_paths: Option<&[std::path::PathBuf]>,
 ) -> (bool, Option<PanelAction>) {
     let mut became_active = false;
     let mut action = None;
@@ -61,7 +69,7 @@ pub fn render_panel(
                 ui.set_min_size(ui.available_size());
 
                 // Kliknięcie w dowolne miejsce panelu aktywuje go i zdejmuje focus z menu
-                if ui.input(|i| i.pointer.any_pressed()) {
+                if !suppress_pointer && ui.input(|i| i.pointer.any_pressed()) {
                     if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                         if ui.max_rect().contains(pos) {
                             became_active = true;
@@ -246,7 +254,10 @@ pub fn render_panel(
                     let mut clicked_row = None;
                     let mut double_clicked_row = None;
                     let mut right_clicked_row = None;
+                    let mut right_click_pos = None;
                     let mut sort_clicked = None;
+                    let table_rect = ui.available_rect_before_wrap();
+                    let fallback_pointer_pos = ui.input(|i| i.pointer.interact_pos());
 
                 let mut table = TableBuilder::new(ui)
                     .striped(true)
@@ -301,7 +312,7 @@ pub fn render_panel(
                             row.set_selected(is_cursor);
 
                             // Theme colors for file types
-                            let text_color = if is_selected {
+                            let base_text_color = if is_selected {
                                 Color32::from_rgb(255, 80, 80) // Red tagged
                             } else if is_cursor && is_active {
                                 Color32::WHITE // High contrast on active cursor
@@ -316,6 +327,13 @@ pub fn render_panel(
                                     "rs" | "toml" | "json" | "c" | "cpp" | "py" | "md" | "txt" => Color32::from_rgb(130, 205, 255),
                                     _ => Color32::from_rgb(230, 235, 245),
                                 }
+                            };
+                            let is_cut = !item.is_parent
+                                && cut_paths.is_some_and(|paths| paths.contains(&item.path));
+                            let text_color = if is_cut {
+                                base_text_color.linear_multiply(0.55)
+                            } else {
+                                base_text_color
                             };
 
                             // Name column
@@ -374,15 +392,19 @@ pub fn render_panel(
                             });
 
                             // Capture click / selection across the entire row
-                            let row_resp = row.response();
-                            if row_resp.clicked() {
-                                clicked_row = Some(idx);
-                            }
-                            if row_resp.double_clicked() {
-                                double_clicked_row = Some(idx);
-                            }
-                            if row_resp.secondary_clicked() {
-                                right_clicked_row = Some(idx);
+                            if !suppress_pointer {
+                                let row_resp = row.response();
+                                if row_resp.clicked() {
+                                    clicked_row = Some(idx);
+                                }
+                                if row_resp.double_clicked() {
+                                    double_clicked_row = Some(idx);
+                                }
+                                if row_resp.secondary_clicked() {
+                                    right_clicked_row = Some(idx);
+                                    right_click_pos =
+                                        row_resp.interact_pointer_pos().or(fallback_pointer_pos);
+                                }
                             }
                         });
                     });
@@ -411,13 +433,42 @@ pub fn render_panel(
 
                 if let Some(idx) = clicked_row {
                     became_active = true;
-                    panel.cursor_idx = idx;
+                    let modifiers = ui.input(|i| i.modifiers);
+                    if modifiers.ctrl {
+                        panel.toggle_select(idx);
+                        panel.cursor_idx = idx;
+                    } else if modifiers.shift {
+                        let anchor = panel.cursor_idx;
+                        panel.select_range(anchor, idx);
+                        panel.cursor_idx = idx;
+                    } else {
+                        panel.cursor_idx = idx;
+                    }
                 }
 
                 if let Some(idx) = right_clicked_row {
                     became_active = true;
-                    panel.cursor_idx = idx;
-                    panel.toggle_select(idx);
+                    let pos = right_click_pos.unwrap_or_else(|| table_rect.center());
+                    action = Some(PanelAction::OpenContextMenu {
+                        side,
+                        pos,
+                        row_idx: Some(idx),
+                    });
+                } else if !suppress_pointer && ui.input(|i| i.pointer.secondary_clicked()) {
+                    if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                        if table_rect.contains(pos) && pos.y > table_rect.min.y + 24.0 {
+                            became_active = true;
+                            ui.ctx().memory_mut(|mem| {
+                                mem.stop_text_input();
+                                mem.close_popup();
+                            });
+                            action = Some(PanelAction::OpenContextMenu {
+                                side,
+                                pos,
+                                row_idx: None,
+                            });
+                        }
+                    }
                 }
 
                 if let Some(idx) = double_clicked_row {
@@ -438,6 +489,7 @@ pub fn render_panel(
     (became_active, action)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_dual_panels(
     ctx: &egui::Context,
     left_panel: &mut PanelState,
@@ -445,6 +497,8 @@ pub fn render_dual_panels(
     active_side: &mut PanelSide,
     drives: &[DriveInfo],
     i18n: &I18n,
+    suppress_pointer: bool,
+    cut_paths: Option<&[std::path::PathBuf]>,
 ) -> Vec<PanelAction> {
     let mut actions = Vec::new();
 
@@ -469,7 +523,16 @@ pub fn render_dual_panels(
             left_ui.set_clip_rect(left_rect);
             left_ui.push_id("left_panel_col", |ui| {
                 let is_active = *active_side == PanelSide::Left;
-                let (became_active, act) = render_panel(ui, left_panel, PanelSide::Left, is_active, drives, i18n);
+                let (became_active, act) = render_panel(
+                    ui,
+                    left_panel,
+                    PanelSide::Left,
+                    is_active,
+                    drives,
+                    i18n,
+                    suppress_pointer,
+                    cut_paths,
+                );
                 if became_active {
                     *active_side = PanelSide::Left;
                 }
@@ -492,7 +555,16 @@ pub fn render_dual_panels(
             right_ui.set_clip_rect(right_rect);
             right_ui.push_id("right_panel_col", |ui| {
                 let is_active = *active_side == PanelSide::Right;
-                let (became_active, act) = render_panel(ui, right_panel, PanelSide::Right, is_active, drives, i18n);
+                let (became_active, act) = render_panel(
+                    ui,
+                    right_panel,
+                    PanelSide::Right,
+                    is_active,
+                    drives,
+                    i18n,
+                    suppress_pointer,
+                    cut_paths,
+                );
                 if became_active {
                     *active_side = PanelSide::Right;
                 }
@@ -502,7 +574,7 @@ pub fn render_dual_panels(
             });
 
             // If user clicked anywhere inside a panel area (including empty space), activate it
-            if ctx.input(|i| i.pointer.primary_clicked()) {
+            if !suppress_pointer && ctx.input(|i| i.pointer.primary_clicked()) {
                 if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
                     if left_rect.contains(pos) {
                         *active_side = PanelSide::Left;

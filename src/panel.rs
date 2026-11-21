@@ -484,6 +484,19 @@ impl PanelState {
         }
     }
 
+    pub fn select_range(&mut self, from: usize, to: usize) {
+        let start = from.min(to);
+        let end = from.max(to);
+        for idx in start..=end {
+            if let Some(item) = self.items.get(idx) {
+                if !item.is_parent {
+                    self.selected_paths.insert(item.path.clone());
+                }
+            }
+        }
+        self.recalculate_totals();
+    }
+
     pub fn select_all(&mut self) {
         for item in &self.items {
             if !item.is_parent {

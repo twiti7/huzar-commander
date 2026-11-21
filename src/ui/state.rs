@@ -267,6 +267,9 @@ pub struct FileOpsState {
     pub show_mkdir: bool,
     pub mkdir_input: String,
 
+    pub show_new_file: bool,
+    pub new_file_input: String,
+
     pub show_delete: bool,
     pub delete_targets: Vec<PathBuf>,
     pub delete_use_trash: bool,
@@ -434,5 +437,158 @@ impl AboutDialogState {
     pub fn open_libraries(&mut self) {
         self.is_open = true;
         self.current_tab = AboutTab::Libraries;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ContextMenuTarget {
+    Item {
+        index: usize,
+        item: crate::fs_item::FileItem,
+        selected_count: usize,
+    },
+    Background {
+        dir_path: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContextMenuSubmenu {
+    #[default]
+    None,
+    SortBy,
+    NewItem,
+}
+
+pub struct ContextMenuState {
+    pub is_open: bool,
+    pub pos: egui::Pos2,
+    pub side: PanelSide,
+    pub target: Option<ContextMenuTarget>,
+    pub in_zip: bool,
+    pub can_paste: bool,
+    pub has_selection: bool,
+    pub show_hidden: bool,
+    pub sort_column: crate::fs_item::SortColumn,
+    pub sort_order: crate::fs_item::SortOrder,
+    pub open_submenu: ContextMenuSubmenu,
+    pub submenu_anchor_y: f32,
+    pub menu_rect: Option<egui::Rect>,
+    pub submenu_rect: Option<egui::Rect>,
+    pub last_menu_size: egui::Vec2,
+    pub opened_this_frame: bool,
+}
+
+impl Default for ContextMenuState {
+    fn default() -> Self {
+        Self {
+            is_open: false,
+            pos: egui::Pos2::ZERO,
+            side: PanelSide::Left,
+            target: None,
+            in_zip: false,
+            can_paste: false,
+            has_selection: false,
+            show_hidden: true,
+            sort_column: crate::fs_item::SortColumn::Name,
+            sort_order: crate::fs_item::SortOrder::Ascending,
+            open_submenu: ContextMenuSubmenu::None,
+            submenu_anchor_y: 0.0,
+            menu_rect: None,
+            submenu_rect: None,
+            last_menu_size: egui::vec2(250.0, 320.0),
+            opened_this_frame: false,
+        }
+    }
+}
+
+impl ContextMenuState {
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_for_item(
+        &mut self,
+        side: PanelSide,
+        pos: egui::Pos2,
+        index: usize,
+        item: crate::fs_item::FileItem,
+        selected_count: usize,
+        in_zip: bool,
+        can_paste: bool,
+        show_hidden: bool,
+        sort_column: crate::fs_item::SortColumn,
+        sort_order: crate::fs_item::SortOrder,
+    ) {
+        self.is_open = true;
+        self.pos = pos;
+        self.side = side;
+        self.target = Some(ContextMenuTarget::Item {
+            index,
+            item,
+            selected_count,
+        });
+        self.in_zip = in_zip;
+        self.can_paste = can_paste;
+        self.has_selection = selected_count > 0;
+        self.show_hidden = show_hidden;
+        self.sort_column = sort_column;
+        self.sort_order = sort_order;
+        self.open_submenu = ContextMenuSubmenu::None;
+        self.submenu_anchor_y = pos.y;
+        self.menu_rect = None;
+        self.submenu_rect = None;
+        self.opened_this_frame = true;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_for_background(
+        &mut self,
+        side: PanelSide,
+        pos: egui::Pos2,
+        dir_path: PathBuf,
+        in_zip: bool,
+        can_paste: bool,
+        has_selection: bool,
+        show_hidden: bool,
+        sort_column: crate::fs_item::SortColumn,
+        sort_order: crate::fs_item::SortOrder,
+    ) {
+        self.is_open = true;
+        self.pos = pos;
+        self.side = side;
+        self.target = Some(ContextMenuTarget::Background { dir_path });
+        self.in_zip = in_zip;
+        self.can_paste = can_paste;
+        self.has_selection = has_selection;
+        self.show_hidden = show_hidden;
+        self.sort_column = sort_column;
+        self.sort_order = sort_order;
+        self.open_submenu = ContextMenuSubmenu::None;
+        self.submenu_anchor_y = pos.y;
+        self.menu_rect = None;
+        self.submenu_rect = None;
+        self.opened_this_frame = true;
+    }
+
+    pub fn close(&mut self) {
+        self.is_open = false;
+        self.target = None;
+        self.open_submenu = ContextMenuSubmenu::None;
+        self.menu_rect = None;
+        self.submenu_rect = None;
+        self.opened_this_frame = false;
+    }
+
+    pub fn contains_pos(&self, pos: egui::Pos2) -> bool {
+        if !self.is_open {
+            return false;
+        }
+        let in_main = self
+            .menu_rect
+            .map(|r| r.expand(2.0).contains(pos))
+            .unwrap_or(false);
+        let in_sub = self
+            .submenu_rect
+            .map(|r| r.expand(2.0).contains(pos))
+            .unwrap_or(false);
+        in_main || in_sub
     }
 }

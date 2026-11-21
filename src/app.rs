@@ -3,25 +3,27 @@ use std::time::Instant;
 
 use egui::{Color32, Key};
 
+use crate::clipboard::{ClipboardOp, FileClipboard};
 use crate::drives::{scan_drives, DriveInfo};
 use crate::fs_item::FileItem;
 use crate::panel::PanelState;
+use crate::ui::context_menu::{render_context_menu, ContextMenuAction};
 use crate::ui::dialog_queue::{
     render_background_tasks_bar, render_progress_dialog, render_queue_dialog,
 };
 use crate::ui::dialog_search::{render_search_dialog, SearchDialogAction};
 use crate::ui::file_dialogs::{
     render_about_dialog, render_copy_dialog, render_delete_dialog, render_drive_menu,
-    render_mask_select_dialog, render_mkdir_dialog, render_move_dialog, render_pack_zip_dialog,
-    render_properties_dialog, render_rename_dialog, FileOpsAction,
+    render_mask_select_dialog, render_mkdir_dialog, render_move_dialog, render_new_file_dialog,
+    render_pack_zip_dialog, render_properties_dialog, render_rename_dialog, FileOpsAction,
 };
 use crate::ui::menu_bars::{
     render_bottom_f_keys, render_cli_status_bar, render_top_menu_bar, MenuAction,
 };
 use crate::ui::panels::{render_dual_panels, PanelAction};
 use crate::ui::state::{
-    AboutDialogState, DriveMenuState, FileOpsState, ProgressUiState, PropertiesDialogState,
-    SearchDialogState, ViewerWindowState,
+    AboutDialogState, ContextMenuState, DriveMenuState, FileOpsState, ProgressUiState,
+    PropertiesDialogState, SearchDialogState, ViewerWindowState,
 };
 use crate::ui::viewer_window::render_viewer_window;
 use crate::worker::{IoWorker, QueueStateSnapshot, WorkerCommand, WorkerEvent};
@@ -47,6 +49,8 @@ pub struct CommanderApp {
     pub properties: PropertiesDialogState,
     pub config_dialog: crate::ui::state::ConfigDialogState,
     pub about_dialog: AboutDialogState,
+    pub context_menu: ContextMenuState,
+    pub clipboard: FileClipboard,
     pub i18n: crate::i18n::I18n,
     pub config: crate::config::AppConfig,
 
@@ -70,6 +74,7 @@ impl CommanderApp {
         visuals.window_fill = Color32::from_rgb(18, 24, 38);
         visuals.override_text_color = Some(Color32::from_rgb(220, 230, 245));
         cc.egui_ctx.set_visuals(visuals);
+        crate::ui::fonts::configure_app_fonts(&cc.egui_ctx);
 
         let drives = scan_drives();
         let fallback_path = if cfg!(target_os = "windows") {
@@ -153,6 +158,8 @@ impl CommanderApp {
             properties: PropertiesDialogState::default(),
             config_dialog: crate::ui::state::ConfigDialogState::default(),
             about_dialog: AboutDialogState::default(),
+            context_menu: ContextMenuState::default(),
+            clipboard: FileClipboard::default(),
             i18n,
             config,
 
@@ -575,74 +582,93 @@ impl CommanderApp {
     fn trigger_properties(&mut self) {
         let target = {
             let active = self.active_panel();
-            active.items.get(active.cursor_idx).and_then(|item| {
-                if item.is_parent {
-                    None
-                } else {
-                    let modified = item.modified.map(|time| {
-                        let dt: chrono::DateTime<chrono::Local> = time.into();
-                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
-                    });
-                    Some((
-                        item.is_dir,
-                        item.path.clone(),
-                        item.name.clone(),
-                        item.size,
-                        modified,
-                        item.is_readonly,
-                        item.is_hidden,
-                    ))
-                }
-            })
+            active
+                .items
+                .get(active.cursor_idx)
+                .filter(|item| !item.is_parent)
+                .cloned()
         };
 
-        if let Some((is_dir, path, name, initial_size, modified, readonly, hidden)) = target {
-            let (is_calculating, rx, size) = if is_dir {
-                let known_size = if self.active_panel().is_calculated_dir(&path) {
-                    initial_size
-                } else {
-                    0
-                };
-                let (tx, rx) = crossbeam_channel::unbounded();
-                let dir_path = path.clone();
-                let repaint_signal = self.make_repaint_signal();
-                std::thread::spawn(move || {
-                    let mut total_size: u64 = 0;
-                    let mut files_cnt = 0;
-                    let mut dirs_cnt = 0;
-                    for entry in walkdir::WalkDir::new(&dir_path).min_depth(1).into_iter().flatten() {
-                        if entry.file_type().is_dir() {
-                            dirs_cnt += 1;
-                        } else if entry.file_type().is_file() {
-                            files_cnt += 1;
-                            if let Ok(meta) = entry.metadata() {
-                                total_size = total_size.saturating_add(meta.len());
-                            }
+        if let Some(item) = target {
+            self.open_properties_for_item(&item);
+        }
+    }
+
+    fn trigger_properties_for_path(&mut self, dir_path: PathBuf) {
+        let item = FileItem::from_path(&dir_path).unwrap_or_else(|| {
+            let name = dir_path.to_string_lossy().to_string();
+            let meta = dir_path.metadata().ok();
+            let modified = meta.as_ref().and_then(|m| m.modified().ok());
+            let is_readonly = meta
+                .as_ref()
+                .map(|m| m.permissions().readonly())
+                .unwrap_or(false);
+            FileItem {
+                name,
+                ext: String::new(),
+                path: dir_path,
+                is_dir: true,
+                is_parent: false,
+                size: 0,
+                modified,
+                is_hidden: false,
+                is_readonly,
+            }
+        });
+        self.open_properties_for_item(&item);
+    }
+
+    fn open_properties_for_item(&mut self, item: &FileItem) {
+        let modified = item.modified.map(|time| {
+            let dt: chrono::DateTime<chrono::Local> = time.into();
+            dt.format("%Y-%m-%d %H:%M:%S").to_string()
+        });
+        let path = item.path.clone();
+        let (is_calculating, rx, size) = if item.is_dir {
+            let known_size = if self.active_panel().is_calculated_dir(&path) {
+                item.size
+            } else {
+                0
+            };
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let dir_path = path.clone();
+            let repaint_signal = self.make_repaint_signal();
+            std::thread::spawn(move || {
+                let mut total_size: u64 = 0;
+                let mut files_cnt = 0;
+                let mut dirs_cnt = 0;
+                for entry in walkdir::WalkDir::new(&dir_path).min_depth(1).into_iter().flatten() {
+                    if entry.file_type().is_dir() {
+                        dirs_cnt += 1;
+                    } else if entry.file_type().is_file() {
+                        files_cnt += 1;
+                        if let Ok(meta) = entry.metadata() {
+                            total_size = total_size.saturating_add(meta.len());
                         }
                     }
-                    let _ = tx.send((total_size, files_cnt, dirs_cnt));
-                    repaint_signal();
-                });
-                (true, Some(rx), known_size)
-            } else {
-                (false, None, initial_size)
-            };
+                }
+                let _ = tx.send((total_size, files_cnt, dirs_cnt));
+                repaint_signal();
+            });
+            (true, Some(rx), known_size)
+        } else {
+            (false, None, item.size)
+        };
 
-            self.properties = PropertiesDialogState {
-                is_open: true,
-                name,
-                path,
-                is_dir,
-                size,
-                files_count: 0,
-                dirs_count: 0,
-                modified,
-                readonly,
-                hidden,
-                is_calculating,
-                rx,
-            };
-        }
+        self.properties = PropertiesDialogState {
+            is_open: true,
+            name: item.name.clone(),
+            path,
+            is_dir: item.is_dir,
+            size,
+            files_count: 0,
+            dirs_count: 0,
+            modified,
+            readonly: item.is_readonly,
+            hidden: item.is_hidden,
+            is_calculating,
+            rx,
+        };
     }
 
     fn poll_properties_calculation(&mut self) {
@@ -823,7 +849,15 @@ impl CommanderApp {
     }
 
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.context_menu.is_open {
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                self.context_menu.close();
+            }
+            return;
+        }
+
         let has_modal = self.file_ops.show_mkdir
+            || self.file_ops.show_new_file
             || self.file_ops.show_delete
             || self.file_ops.show_copy
             || self.file_ops.show_move
@@ -865,6 +899,7 @@ impl CommanderApp {
 
         let mut is_panel_nav = false;
         let mut enter_pressed = false;
+        let wants_kbd = ctx.wants_keyboard_input();
 
         ctx.input(|i| {
             if i.modifiers.alt && i.key_pressed(Key::F7) {
@@ -920,6 +955,41 @@ impl CommanderApp {
                 }
             } else if i.modifiers.ctrl && i.key_pressed(Key::F) {
                 self.active_panel_mut().is_filter_open = true;
+            } else if !wants_kbd
+                && i.modifiers.ctrl
+                && !i.modifiers.alt
+                && !i.modifiers.shift
+                && i.key_pressed(Key::C)
+            {
+                if !self.active_panel().is_in_zip() {
+                    self.trigger_clipboard_copy();
+                }
+            } else if !wants_kbd
+                && i.modifiers.ctrl
+                && !i.modifiers.alt
+                && !i.modifiers.shift
+                && i.key_pressed(Key::X)
+            {
+                if !self.active_panel().is_in_zip() {
+                    self.trigger_clipboard_cut();
+                }
+            } else if !wants_kbd
+                && i.modifiers.ctrl
+                && !i.modifiers.alt
+                && !i.modifiers.shift
+                && i.key_pressed(Key::V)
+            {
+                if !self.active_panel().is_in_zip() {
+                    let target_dir = self.active_panel().current_path.clone();
+                    self.trigger_clipboard_paste(target_dir);
+                }
+            } else if !wants_kbd
+                && i.modifiers.ctrl
+                && !i.modifiers.alt
+                && !i.modifiers.shift
+                && i.key_pressed(Key::A)
+            {
+                self.active_panel_mut().select_all();
             } else if i.key_pressed(Key::Escape) {
                 if self.active_panel_mut().cancel_loading() || self.passive_panel_mut().cancel_loading() {
                     let msg = self.i18n.t("panels.loading_cancelled").to_string();
@@ -1100,21 +1170,329 @@ impl CommanderApp {
             }
             MenuAction::OpenTerminal => {
                 let path = self.active_panel().current_path.clone();
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = std::process::Command::new("cmd.exe")
-                        .current_dir(&path)
-                        .spawn();
+                if let Err(e) = crate::opener::open_terminal(&path) {
+                    self.set_status(e);
                 }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let term = std::env::var("TERMINAL").unwrap_or_else(|_| "x-terminal-emulator".to_string());
-                    if std::process::Command::new(&term).current_dir(&path).spawn().is_err()
-                        && std::process::Command::new("gnome-terminal").current_dir(&path).spawn().is_err()
-                        && std::process::Command::new("konsole").current_dir(&path).spawn().is_err()
-                    {
-                        let _ = std::process::Command::new("xterm").current_dir(&path).spawn();
+            }
+        }
+    }
+
+    fn open_context_menu(&mut self, side: PanelSide, pos: egui::Pos2, row_idx: Option<usize>) {
+        self.active_side = side;
+        let can_paste = self.clipboard.has_files();
+
+        let (
+            in_zip,
+            show_hidden,
+            sort_column,
+            sort_order,
+            current_path,
+            has_selection,
+            target_item,
+        ) = {
+            let panel = self.active_panel_mut();
+            let target_item = if let Some(idx) = row_idx {
+                if let Some(it) = panel.items.get(idx).cloned() {
+                    if !it.is_parent {
+                        if !panel.selected_paths.contains(&it.path) {
+                            panel.deselect_all();
+                        }
+                        panel.cursor_idx = idx;
+                        let sel_cnt = panel.selected_or_cursor_items().len();
+                        Some((idx, it, sel_cnt))
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (
+                panel.is_in_zip(),
+                panel.show_hidden,
+                panel.sort_column,
+                panel.sort_order,
+                panel.current_path.clone(),
+                !panel.selected_paths.is_empty(),
+                target_item,
+            )
+        };
+
+        if let Some((idx, item, selected_count)) = target_item {
+            self.context_menu.open_for_item(
+                side,
+                pos,
+                idx,
+                item,
+                selected_count,
+                in_zip,
+                can_paste,
+                show_hidden,
+                sort_column,
+                sort_order,
+            );
+        } else {
+            self.context_menu.open_for_background(
+                side,
+                pos,
+                current_path,
+                in_zip,
+                can_paste,
+                has_selection,
+                show_hidden,
+                sort_column,
+                sort_order,
+            );
+        }
+    }
+
+    fn trigger_clipboard_copy(&mut self) {
+        let sources = self.active_panel().selected_or_cursor_items();
+        if sources.is_empty() {
+            return;
+        }
+        let count = sources.len();
+        match self.clipboard.set_files(sources, ClipboardOp::Copy) {
+            Ok(()) => {
+                let msg = self
+                    .i18n
+                    .t_fmt("status.clipboard_copied", &[("count", &count.to_string())]);
+                self.set_status(msg);
+            }
+            Err(e) => self.set_status(e),
+        }
+    }
+
+    fn trigger_clipboard_cut(&mut self) {
+        let sources = self.active_panel().selected_or_cursor_items();
+        if sources.is_empty() {
+            return;
+        }
+        let count = sources.len();
+        match self.clipboard.set_files(sources, ClipboardOp::Cut) {
+            Ok(()) => {
+                let msg = self
+                    .i18n
+                    .t_fmt("status.clipboard_cut", &[("count", &count.to_string())]);
+                self.set_status(msg);
+            }
+            Err(e) => self.set_status(e),
+        }
+    }
+
+    fn trigger_clipboard_paste(&mut self, target_dir: PathBuf) {
+        if let Some((sources, op)) = self.clipboard.get_files() {
+            let existing: Vec<PathBuf> = sources.into_iter().filter(|p| p.exists()).collect();
+            if existing.is_empty() {
+                self.set_status("Schowek nie zawiera istniejących plików");
+                return;
+            }
+            if let Some(first_name) = existing
+                .first()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+            {
+                self.last_copy_info = Some((target_dir.clone(), first_name));
+            }
+            match op {
+                ClipboardOp::Copy => {
+                    self.worker.enqueue(WorkerCommand::Copy {
+                        sources: existing,
+                        target_dir,
+                    });
+                }
+                ClipboardOp::Cut => {
+                    self.worker.enqueue(WorkerCommand::Move {
+                        sources: existing,
+                        target_dir,
+                    });
+                    self.clipboard.clear();
+                }
+            }
+            self.progress.is_open = true;
+            self.egui_ctx.request_repaint();
+        }
+    }
+
+    fn trigger_new_text_file(&mut self, dir: PathBuf) {
+        let base_name = self.i18n.t("ctx_menu.new_text_file_default_name").to_string();
+        let new_path = crate::opener::generate_non_colliding_file_name(&dir, &base_name, "txt");
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&new_path)
+        {
+            Ok(_) => {
+                let file_name = new_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                self.active_panel_mut().refresh();
+                if let Some(pos) = self
+                    .active_panel()
+                    .items
+                    .iter()
+                    .position(|it| it.name == file_name || it.path == new_path)
+                {
+                    let active = self.active_panel_mut();
+                    active.cursor_idx = pos;
+                    active.scroll_to_cursor = true;
+                }
+                self.passive_panel_mut().refresh();
+                let msg = self.i18n.t_fmt("status.file_created", &[("name", &file_name)]);
+                self.set_status(msg);
+                self.file_ops.rename_source = Some(new_path);
+                self.file_ops.rename_input = file_name;
+                self.file_ops.show_rename = true;
+            }
+            Err(e) => {
+                self.set_status(format!("Błąd tworzenia pliku: {}", e));
+            }
+        }
+    }
+
+    fn dispatch_context_menu_action(&mut self, ctx: &egui::Context, action: ContextMenuAction) {
+        match action {
+            ContextMenuAction::OpenItem(item) => self.open_item(&item),
+            ContextMenuAction::OpenInOtherPanel(dir) => {
+                let other_side = match self.active_side {
+                    PanelSide::Left => PanelSide::Right,
+                    PanelSide::Right => PanelSide::Left,
+                };
+                self.navigate_panel_to(other_side, dir);
+            }
+            ContextMenuAction::OpenWith(path) => {
+                if let Err(e) = crate::opener::open_with_dialog(&path) {
+                    self.set_status(e);
+                }
+            }
+            ContextMenuAction::RunAsAdmin(path) => {
+                if let Err(e) = crate::opener::run_as_administrator(&path) {
+                    self.set_status(e);
+                }
+            }
+            ContextMenuAction::ViewF3 => self.trigger_f3_view(),
+            ContextMenuAction::EditF4 => self.trigger_f4_edit(),
+            ContextMenuAction::Cut => self.trigger_clipboard_cut(),
+            ContextMenuAction::Copy => self.trigger_clipboard_copy(),
+            ContextMenuAction::Paste(target_dir) => self.trigger_clipboard_paste(target_dir),
+            ContextMenuAction::CopyAsPath(paths) => {
+                let targets = if paths.is_empty() {
+                    let active = self.active_panel();
+                    let ordered: Vec<PathBuf> = active
+                        .items
+                        .iter()
+                        .filter(|it| !it.is_parent && active.selected_paths.contains(&it.path))
+                        .map(|it| it.path.clone())
+                        .collect();
+                    if ordered.is_empty() {
+                        active.selected_or_cursor_items()
+                    } else {
+                        ordered
+                    }
+                } else {
+                    paths
+                };
+                let joined = targets
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ctx.copy_text(joined);
+                let msg = self.i18n.t("status.path_copied").to_string();
+                self.set_status(msg);
+            }
+            ContextMenuAction::CopyName(name) => {
+                ctx.copy_text(name);
+                let msg = self.i18n.t("status.name_copied").to_string();
+                self.set_status(msg);
+            }
+            ContextMenuAction::CopyToOtherPanelF5 => self.trigger_f5_copy(),
+            ContextMenuAction::MoveToOtherPanelF6 => self.trigger_f6_move(),
+            ContextMenuAction::PackZip => self.trigger_pack_zip(),
+            ContextMenuAction::ExtractZipHere(archive) => {
+                let target_dir = self.active_panel().current_path.clone();
+                self.worker.enqueue(WorkerCommand::ExtractZip {
+                    archive_path: archive,
+                    target_dir,
+                    filter_prefix: None,
+                });
+                self.progress.is_open = true;
+                ctx.request_repaint();
+            }
+            ContextMenuAction::ExtractZipToFolder(archive) => {
+                let stem = archive
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "archive".to_string());
+                let target_dir = self.active_panel().current_path.join(stem);
+                self.worker.enqueue(WorkerCommand::ExtractZip {
+                    archive_path: archive,
+                    target_dir,
+                    filter_prefix: None,
+                });
+                self.progress.is_open = true;
+                ctx.request_repaint();
+            }
+            ContextMenuAction::CalculateDirSize => self.calculate_current_dir_size(),
+            ContextMenuAction::Rename => self.trigger_rename(),
+            ContextMenuAction::Delete => self.trigger_f8_delete(),
+            ContextMenuAction::NewFolder => self.trigger_f7_mkdir(),
+            ContextMenuAction::NewTextFile(dir) => self.trigger_new_text_file(dir),
+            ContextMenuAction::NewCustomFile => {
+                self.file_ops.new_file_input.clear();
+                self.file_ops.show_new_file = true;
+            }
+            ContextMenuAction::Refresh => {
+                self.active_panel_mut().refresh();
+            }
+            ContextMenuAction::SortBy(col) => {
+                let active = self.active_panel_mut();
+                if active.sort_column == col {
+                    active.sort_order = match active.sort_order {
+                        crate::fs_item::SortOrder::Ascending => crate::fs_item::SortOrder::Descending,
+                        crate::fs_item::SortOrder::Descending => crate::fs_item::SortOrder::Ascending,
+                    };
+                } else {
+                    active.sort_column = col;
+                    active.sort_order = crate::fs_item::SortOrder::Ascending;
+                }
+                active.sort_items();
+            }
+            ContextMenuAction::SetSortOrder(ord) => {
+                let active = self.active_panel_mut();
+                active.sort_order = ord;
+                active.sort_items();
+            }
+            ContextMenuAction::SelectAll => self.active_panel_mut().select_all(),
+            ContextMenuAction::DeselectAll => self.active_panel_mut().deselect_all(),
+            ContextMenuAction::ToggleHidden => {
+                self.left_panel.toggle_hidden();
+                self.right_panel.toggle_hidden();
+                let state_str = if self.active_panel().show_hidden {
+                    "widoczne"
+                } else {
+                    "ukryte"
+                };
+                self.set_status(format!("Pliki ukryte: {}", state_str));
+            }
+            ContextMenuAction::OpenTerminal(dir) => {
+                if let Err(e) = crate::opener::open_terminal(&dir) {
+                    self.set_status(e);
+                }
+            }
+            ContextMenuAction::ShowInExplorer { path, select_item } => {
+                if let Err(e) = crate::opener::show_in_explorer(&path, select_item) {
+                    self.set_status(e);
+                }
+            }
+            ContextMenuAction::Properties(None) => self.trigger_properties(),
+            ContextMenuAction::Properties(Some(dir)) => self.trigger_properties_for_path(dir),
+            ContextMenuAction::SystemProperties(path) => {
+                if let Err(e) = crate::opener::open_system_properties(&path) {
+                    self.set_status(e);
                 }
             }
         }
@@ -1142,6 +1520,9 @@ impl CommanderApp {
                     PanelSide::Right => &mut self.right_panel,
                 };
                 p.go_up_async(Some(repaint_signal));
+            }
+            PanelAction::OpenContextMenu { side, pos, row_idx } => {
+                self.open_context_menu(side, pos, row_idx);
             }
         }
     }
@@ -1174,6 +1555,36 @@ impl CommanderApp {
                     self.progress.in_background = true;
                 }
                 FileOpsAction::StatusMessage(msg) => self.set_status(msg),
+                FileOpsAction::CreateFile { .. } => {}
+            }
+        }
+
+        // New file dialog
+        if let Some(FileOpsAction::CreateFile { path, name }) =
+            render_new_file_dialog(ctx, &mut self.file_ops, &active_dir, &self.i18n)
+        {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => {
+                    self.active_panel_mut().refresh();
+                    if let Some(pos) = self
+                        .active_panel()
+                        .items
+                        .iter()
+                        .position(|it| it.name == name || it.path == path)
+                    {
+                        self.active_panel_mut().cursor_idx = pos;
+                        self.active_panel_mut().scroll_to_cursor = true;
+                    }
+                    self.passive_panel_mut().refresh();
+                    let msg = self.i18n.t_fmt("status.file_created", &[("name", &name)]);
+                    self.set_status(msg);
+                    ctx.request_repaint();
+                }
+                Err(e) => self.set_status(format!("Błąd tworzenia pliku: {}", e)),
             }
         }
 
@@ -1360,6 +1771,11 @@ impl CommanderApp {
                 crate::ui::dialog_config::ConfigDialogAction::Close => {}
             }
         }
+
+        // Context menu
+        if let Some(act) = render_context_menu(ctx, &mut self.context_menu, &self.i18n) {
+            self.dispatch_context_menu_action(ctx, act);
+        }
     }
 }
 
@@ -1406,6 +1822,21 @@ impl eframe::App for CommanderApp {
         }
 
         // Central dual panels
+        let ctx_menu_was_open = self.context_menu.is_open;
+        let pointer_pos = ctx.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()));
+        let pointer_over_ctx_menu =
+            ctx_menu_was_open && pointer_pos.is_some_and(|p| self.context_menu.contains_pos(p));
+        let primary_dismiss_ctx_menu = ctx_menu_was_open
+            && !pointer_over_ctx_menu
+            && ctx.input(|i| {
+                i.pointer.primary_pressed() || i.pointer.button_pressed(egui::PointerButton::Middle)
+            });
+        if primary_dismiss_ctx_menu {
+            self.context_menu.close();
+        }
+        let suppress_panel_clicks = pointer_over_ctx_menu || primary_dismiss_ctx_menu;
+
+        let cut_paths_owned = self.clipboard.cut_paths().map(|s| s.to_vec());
         let panel_actions = render_dual_panels(
             ctx,
             &mut self.left_panel,
@@ -1413,6 +1844,8 @@ impl eframe::App for CommanderApp {
             &mut self.active_side,
             &self.drives,
             &self.i18n,
+            suppress_panel_clicks,
+            cut_paths_owned.as_deref(),
         );
         for act in panel_actions {
             self.dispatch_panel_action(act);

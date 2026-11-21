@@ -4,7 +4,7 @@
 .DESCRIPTION
     1. Buduje wersję produkcyjną (cargo build --release).
     2. Szuka kompilatora Inno Setup (ISCC.exe).
-    3. Kompiluje instalator do target\installer\HuzarCommander-Setup-v0.1.0.exe.
+    3. Kompiluje instalator do target\installer\HuzarCommander-Setup-v0.2.0.exe.
 #>
 
 $ErrorActionPreference = "Stop"

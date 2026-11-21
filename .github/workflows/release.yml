@@ -33,7 +33,7 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}".TrimStart('v')
-          if (-not $ver) { $ver = "0.1.0" }
+          if (-not $ver) { $ver = "0.2.0" }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer\huzar_setup.iss
 
       - name: Package Windows Portable Archive
