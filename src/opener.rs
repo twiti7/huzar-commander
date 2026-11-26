@@ -768,6 +768,18 @@ pub fn open_zip_entry(archive_path: &Path, internal_name: &str) -> Result<PathBu
     let clean_name = internal_name.replace('\\', "/");
     let file_name = clean_name.rsplit('/').next().unwrap_or(&clean_name);
 
+    let is_safe_single_name = !file_name.is_empty()
+        && file_name != "."
+        && file_name != ".."
+        && !file_name.contains(':')
+        && !file_name.contains('\0');
+    if !is_safe_single_name {
+        return Err(format!(
+            "Nieprawidłowa nazwa pliku w archiwum ZIP: '{}'",
+            internal_name
+        ));
+    }
+
     let archive_stem = archive_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -779,20 +791,128 @@ pub fn open_zip_entry(archive_path: &Path, internal_name: &str) -> Result<PathBu
 
     let target_file = temp_dir.join(file_name);
 
-    crate::zip_support::extract_single_zip_entry(archive_path, internal_name, &target_file)?;
+    crate::archive::extract_single_archive_entry(archive_path, internal_name, &target_file)?;
 
     open_file(&target_file)?;
 
     Ok(target_file)
 }
 
+/// Removes temporary preview files created when viewing or opening files from ZIP archives.
+pub fn cleanup_preview_temp_dir() {
+    cleanup_preview_temp_dir_at(&std::env::temp_dir().join("cmdr_preview"));
+}
+
+/// Removes the specified preview temporary directory if it exists, ignoring locked/missing errors.
+pub fn cleanup_preview_temp_dir_at(dir: &Path) {
+    if dir.exists() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewerMode {
     Text,
+    Code,
     Hex,
     Markdown,
     Json,
     Yaml,
+    Image,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextEncoding {
+    #[default]
+    Utf8,
+    Windows1250,
+    Utf16Le,
+    Utf16Be,
+}
+
+impl TextEncoding {
+    pub fn label(&self) -> &'static str {
+        match self {
+            TextEncoding::Utf8 => "UTF-8",
+            TextEncoding::Windows1250 => "Windows-1250",
+            TextEncoding::Utf16Le => "UTF-16 LE",
+            TextEncoding::Utf16Be => "UTF-16 BE",
+        }
+    }
+}
+
+/// Detects BOM-based encoding for text chunks (defaults to UTF-8).
+pub fn detect_encoding(buf: &[u8]) -> TextEncoding {
+    if buf.starts_with(&[0xFF, 0xFE]) {
+        TextEncoding::Utf16Le
+    } else if buf.starts_with(&[0xFE, 0xFF]) {
+        TextEncoding::Utf16Be
+    } else {
+        TextEncoding::Utf8
+    }
+}
+
+/// Decodes raw bytes according to the selected text encoding.
+pub fn decode_bytes_with_encoding(buf: &[u8], encoding: TextEncoding) -> String {
+    match encoding {
+        TextEncoding::Utf8 => String::from_utf8_lossy(buf).into_owned(),
+        TextEncoding::Windows1250 => encoding_rs::WINDOWS_1250.decode(buf).0.into_owned(),
+        TextEncoding::Utf16Le => encoding_rs::UTF_16LE.decode(buf).0.into_owned(),
+        TextEncoding::Utf16Be => encoding_rs::UTF_16BE.decode(buf).0.into_owned(),
+    }
+}
+
+/// Checks if a file has an extension supported by native egui image preview.
+pub fn is_native_preview_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Checks if a file has a source/config extension suited for syntax-highlighted code mode.
+pub fn is_code_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "rs" | "py"
+                    | "js"
+                    | "jsx"
+                    | "ts"
+                    | "tsx"
+                    | "c"
+                    | "h"
+                    | "cpp"
+                    | "hpp"
+                    | "cc"
+                    | "cs"
+                    | "java"
+                    | "go"
+                    | "toml"
+                    | "ini"
+                    | "cfg"
+                    | "sql"
+                    | "sh"
+                    | "bash"
+                    | "zsh"
+                    | "ps1"
+                    | "bat"
+                    | "cmd"
+                    | "html"
+                    | "htm"
+                    | "xml"
+                    | "css"
+                    | "scss"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Sprawdza, czy plik posiada rozszerzenie wskazujące na dokument Markdown (.md, .markdown)
@@ -894,9 +1014,14 @@ pub fn format_hex_chunk(buf: &[u8], base_offset: u64, total_size: u64) -> String
     out
 }
 
-/// Formatuje fragment danych jako czytelny tekst UTF-8 / ASCII z nagłówkiem informującym o pozycji
-pub fn format_text_chunk(buf: &[u8], base_offset: u64, total_size: u64) -> String {
-    let text = String::from_utf8_lossy(buf);
+/// Formatuje fragment danych jako czytelny tekst zgodnie z wybranym kodowaniem i nagłówkiem pozycji
+pub fn format_text_chunk_with_encoding(
+    buf: &[u8],
+    base_offset: u64,
+    total_size: u64,
+    encoding: TextEncoding,
+) -> String {
+    let text = decode_bytes_with_encoding(buf, encoding);
     let mut out = String::with_capacity(text.len() + 128);
     let end_offset = base_offset + buf.len() as u64;
     if base_offset > 0 || end_offset < total_size {
@@ -915,6 +1040,11 @@ pub fn format_text_chunk(buf: &[u8], base_offset: u64, total_size: u64) -> Strin
     }
     out.push_str(&text);
     out
+}
+
+/// Formatuje fragment danych jako czytelny tekst UTF-8 / ASCII z nagłówkiem informującym o pozycji
+pub fn format_text_chunk(buf: &[u8], base_offset: u64, total_size: u64) -> String {
+    format_text_chunk_with_encoding(buf, base_offset, total_size, TextEncoding::Utf8)
 }
 
 /// Sprawdza, czy plik jest obrazem/grafiką na podstawie rozszerzenia

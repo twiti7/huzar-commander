@@ -5,8 +5,10 @@ use humansize::{format_size, DECIMAL};
 use crate::app::PanelSide;
 use crate::drives::DriveInfo;
 use crate::i18n::I18n;
-use crate::ui::state::{AboutDialogState, AboutTab, DriveMenuState, FileOpsState, LicenseViewKind};
-use crate::worker::WorkerCommand;
+use crate::ui::state::{
+    AboutDialogState, AboutTab, ConflictDialogState, DriveMenuState, FileOpsState, LicenseViewKind,
+};
+use crate::worker::{ConflictResolution, WorkerCommand};
 
 pub enum FileOpsAction {
     EnqueueCommand(WorkerCommand),
@@ -187,6 +189,44 @@ pub fn render_delete_dialog(
     action
 }
 
+fn build_zip_extract_cmd(
+    sources: &[PathBuf],
+    archive_path: &Path,
+    internal_dir: &str,
+    target_dir: PathBuf,
+) -> WorkerCommand {
+    let filter_prefix = if internal_dir.is_empty() {
+        None
+    } else {
+        Some(internal_dir.to_string())
+    };
+    let selected_entries: Vec<String> = sources
+        .iter()
+        .filter_map(|src| {
+            if let Ok(rel) = src.strip_prefix(archive_path) {
+                let s = rel.to_string_lossy().replace('\\', "/");
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+            src.file_name().map(|n| {
+                let name = n.to_string_lossy();
+                if internal_dir.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{}{}", internal_dir, name)
+                }
+            })
+        })
+        .collect();
+    WorkerCommand::ExtractZip {
+        archive_path: archive_path.to_path_buf(),
+        target_dir,
+        filter_prefix,
+        selected_entries,
+    }
+}
+
 pub fn render_copy_dialog(
     ctx: &egui::Context,
     state: &mut FileOpsState,
@@ -200,7 +240,11 @@ pub fn render_copy_dialog(
     }
 
     let mut action = None;
-    let title = if in_zip { "F5 - Rozpakowywanie archiwum ZIP" } else { i18n.t("dialogs.copy_title") };
+    let title = if in_zip {
+        i18n.t("dialogs.extract_zip_title")
+    } else {
+        i18n.t("dialogs.copy_title")
+    };
 
     egui::Window::new(title)
         .collapsible(false)
@@ -209,7 +253,7 @@ pub fn render_copy_dialog(
         .show(ctx, |ui| {
             let count_str = state.copy_sources.len().to_string();
             let prompt = if in_zip {
-                format!("Wypakuj {} elementów do:", count_str)
+                i18n.t_fmt("dialogs.extract_zip_prompt", &[("count", &count_str)])
             } else {
                 i18n.t_fmt("dialogs.copy_prompt", &[("count", &count_str)])
             };
@@ -220,23 +264,16 @@ pub fn render_copy_dialog(
                 let btn_label = if is_busy {
                     i18n.t("dialogs.copy_background")
                 } else if in_zip {
-                    "Rozpakuj"
+                    i18n.t("dialogs.extract_zip_btn")
                 } else {
                     i18n.t("dialogs.copy_btn")
                 };
                 if ui.button(RichText::new(btn_label).strong()).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
                     let target_dir = PathBuf::from(state.copy_dest_path.trim());
                     let cmd = if in_zip {
-                        if let Some((archive_path, internal_dir)) = zip_location {
-                            let filter_prefix = if internal_dir.is_empty() { None } else { Some(internal_dir.to_string()) };
-                            Some(WorkerCommand::ExtractZip {
-                                archive_path: archive_path.to_path_buf(),
-                                target_dir,
-                                filter_prefix,
-                            })
-                        } else {
-                            None
-                        }
+                        zip_location.map(|(archive_path, internal_dir)| {
+                            build_zip_extract_cmd(&state.copy_sources, archive_path, internal_dir, target_dir)
+                        })
                     } else {
                         Some(WorkerCommand::Copy {
                             sources: state.copy_sources.clone(),
@@ -257,16 +294,9 @@ pub fn render_copy_dialog(
                 if !is_busy && ui.button(i18n.t("dialogs.copy_background")).clicked() {
                     let target_dir = PathBuf::from(state.copy_dest_path.trim());
                     let cmd = if in_zip {
-                        if let Some((archive_path, internal_dir)) = zip_location {
-                            let filter_prefix = if internal_dir.is_empty() { None } else { Some(internal_dir.to_string()) };
-                            Some(WorkerCommand::ExtractZip {
-                                archive_path: archive_path.to_path_buf(),
-                                target_dir,
-                                filter_prefix,
-                            })
-                        } else {
-                            None
-                        }
+                        zip_location.map(|(archive_path, internal_dir)| {
+                            build_zip_extract_cmd(&state.copy_sources, archive_path, internal_dir, target_dir)
+                        })
                     } else {
                         Some(WorkerCommand::Copy {
                             sources: state.copy_sources.clone(),
@@ -1000,14 +1030,14 @@ pub fn render_pack_zip_dialog(
                     && can_pack
                 {
                     let archive_path = PathBuf::from(state.pack_zip_dest.trim());
-                    action = Some(FileOpsAction::EnqueueCommand(WorkerCommand::CreateZip {
+                    let cmd = WorkerCommand::CreateZip {
                         sources: state.pack_zip_sources.clone(),
                         archive_path,
-                    }));
+                    };
                     if is_busy {
-                        action = Some(FileOpsAction::StatusMessage(
-                            "Dodano zadanie pakowania do kolejki w tle".to_string(),
-                        ));
+                        action = Some(FileOpsAction::EnqueueCommandWithBackground(cmd));
+                    } else {
+                        action = Some(FileOpsAction::EnqueueCommand(cmd));
                     }
                     state.show_pack_zip = false;
                 }
@@ -1075,19 +1105,26 @@ pub fn render_mask_select_dialog(
     apply
 }
 
+pub enum PropertiesDialogAction {
+    CalculateChecksums,
+}
+
 pub fn render_properties_dialog(
     ctx: &egui::Context,
     state: &mut crate::ui::state::PropertiesDialogState,
     i18n: &I18n,
-) {
+) -> Option<PropertiesDialogAction> {
     if !state.is_open {
-        return;
+        return None;
     }
+
+    let mut action = None;
+    let mut verify_has_focus = false;
 
     egui::Window::new(format!("ℹ {}: {}", i18n.t("dialogs.props_title"), state.name))
         .collapsible(false)
         .resizable(false)
-        .default_width(450.0)
+        .default_width(520.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
@@ -1177,13 +1214,152 @@ pub fn render_properties_dialog(
                     ui.end_row();
                 });
 
+            if !state.is_dir {
+                ui.add_space(4.0);
+                egui::Frame::NONE
+                    .fill(Color32::from_rgb(14, 20, 34))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(35, 50, 78)))
+                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.set_min_width(480.0);
+                        ui.label(
+                            RichText::new(i18n.t("dialogs.props_checksums_title"))
+                                .strong()
+                                .size(12.0)
+                                .color(Color32::from_rgb(130, 210, 255)),
+                        );
+                        ui.add_space(4.0);
+
+                        if state.checksum_calculating {
+                            let frac = if state.checksum_bytes_total > 0 {
+                                (state.checksum_bytes_done as f32
+                                    / state.checksum_bytes_total as f32)
+                                    .clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::ProgressBar::new(frac)
+                                        .desired_width(360.0)
+                                        .show_percentage(),
+                                );
+                                if ui.button(i18n.t("dialogs.btn_cancel")).clicked() {
+                                    state.cancel_checksum();
+                                }
+                            });
+                        } else if let Some(ref err) = state.checksum_error {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(err)
+                                        .size(11.5)
+                                        .color(Color32::from_rgb(255, 110, 110)),
+                                );
+                                if ui.button(i18n.t("dialogs.props_calc_checksums")).clicked() {
+                                    action = Some(PropertiesDialogAction::CalculateChecksums);
+                                }
+                            });
+                        } else if let Some(hashes) = state.checksums.clone() {
+                            egui::Grid::new("prop_checksum_grid")
+                                .num_columns(3)
+                                .spacing([8.0, 4.0])
+                                .show(ui, |ui| {
+                                    let rows = [
+                                        (crate::checksum::ChecksumAlgorithm::Sha256, &hashes.sha256),
+                                        (crate::checksum::ChecksumAlgorithm::Md5, &hashes.md5),
+                                        (crate::checksum::ChecksumAlgorithm::Crc32, &hashes.crc32),
+                                    ];
+                                    for (alg, value) in rows {
+                                        ui.label(
+                                            RichText::new(format!("{}:", alg.label()))
+                                                .strong()
+                                                .size(11.5),
+                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(value)
+                                                    .font(egui::FontId::monospace(10.5))
+                                                    .color(Color32::from_rgb(210, 225, 245)),
+                                            )
+                                            .selectable(true)
+                                            .wrap(),
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui.small_button(i18n.t("viewer.copy_btn")).clicked() {
+                                                ctx.copy_text(value.clone());
+                                                state.checksum_copied_notice =
+                                                    Some((alg, std::time::Instant::now()));
+                                            }
+                                            if let Some((copied_alg, t)) = state.checksum_copied_notice {
+                                                if copied_alg == alg && t.elapsed().as_secs() < 2 {
+                                                    ui.label(
+                                                        RichText::new("✓")
+                                                            .strong()
+                                                            .color(Color32::from_rgb(100, 240, 150)),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                        ui.end_row();
+                                    }
+                                });
+
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(i18n.t("dialogs.props_verify_label"))
+                                        .strong()
+                                        .size(11.5),
+                                );
+                                let verify_edit = ui.add(
+                                    egui::TextEdit::singleline(&mut state.checksum_verify_input)
+                                        .hint_text(i18n.t("dialogs.props_verify_hint"))
+                                        .desired_width(270.0),
+                                );
+                                verify_has_focus = verify_edit.has_focus();
+
+                                match crate::checksum::verify_checksum_input(
+                                    &state.checksum_verify_input,
+                                    &hashes,
+                                ) {
+                                    crate::checksum::ChecksumVerifyResult::Empty => {}
+                                    crate::checksum::ChecksumVerifyResult::Matched(alg) => {
+                                        let msg = i18n.t_fmt(
+                                            "dialogs.props_verify_match",
+                                            &[("alg", alg.label())],
+                                        );
+                                        ui.label(
+                                            RichText::new(msg)
+                                                .strong()
+                                                .color(Color32::from_rgb(100, 240, 150)),
+                                        );
+                                    }
+                                    crate::checksum::ChecksumVerifyResult::Mismatch => {
+                                        ui.label(
+                                            RichText::new(i18n.t("dialogs.props_verify_mismatch"))
+                                                .strong()
+                                                .color(Color32::from_rgb(255, 110, 110)),
+                                        );
+                                    }
+                                }
+                            });
+                        } else if ui.button(i18n.t("dialogs.props_calc_checksums")).clicked() {
+                            action = Some(PropertiesDialogAction::CalculateChecksums);
+                        }
+                    });
+            }
+
             ui.separator();
 
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(format!("{} (Esc)", i18n.t("dialogs.btn_close"))).clicked()
-                        || ui.input(|i| i.key_pressed(Key::Escape) || i.key_pressed(Key::Enter))
+                        || ui.input(|i| {
+                            i.key_pressed(Key::Escape)
+                                || (!verify_has_focus && i.key_pressed(Key::Enter))
+                        })
                     {
+                        state.cancel_checksum();
                         state.is_open = false;
                         state.is_calculating = false;
                         state.rx = None;
@@ -1191,6 +1367,169 @@ pub fn render_properties_dialog(
                 });
             });
         });
+
+    action
+}
+
+pub fn render_exit_confirm_dialog(
+    ctx: &egui::Context,
+    state: &mut FileOpsState,
+    i18n: &I18n,
+) -> bool {
+    if !state.show_exit_confirm {
+        return false;
+    }
+
+    let mut confirmed = false;
+
+    egui::Window::new(i18n.t("dialogs.exit_confirm_title"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(i18n.t("dialogs.exit_confirm_prompt"));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let abort_btn = egui::Button::new(
+                    RichText::new(i18n.t("dialogs.exit_confirm_btn"))
+                        .strong()
+                        .color(Color32::WHITE),
+                )
+                .fill(Color32::from_rgb(175, 45, 45));
+
+                if ui.add(abort_btn).clicked() {
+                    confirmed = true;
+                    state.show_exit_confirm = false;
+                }
+                if ui.button(i18n.t("dialogs.btn_cancel")).clicked()
+                    || ui.input(|i| i.key_pressed(Key::Escape))
+                {
+                    state.show_exit_confirm = false;
+                }
+            });
+        });
+
+    confirmed
+}
+
+fn format_conflict_time(modified: Option<std::time::SystemTime>) -> String {
+    modified
+        .map(|t| {
+            let dt: chrono::DateTime<chrono::Local> = t.into();
+            dt.format("%Y-%m-%d %H:%M:%S").to_string()
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+pub fn render_conflict_dialog(
+    ctx: &egui::Context,
+    state: &mut ConflictDialogState,
+    i18n: &I18n,
+) {
+    if !state.is_open {
+        return;
+    }
+
+    let mut chosen: Option<ConflictResolution> = None;
+
+    egui::Window::new(i18n.t("dialogs.conflict_title"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(520.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            let file_name = state
+                .destination
+                .as_ref()
+                .map(|d| d.name.as_str())
+                .unwrap_or("");
+            ui.label(
+                RichText::new(i18n.t_fmt("dialogs.conflict_prompt", &[("name", file_name)]))
+                    .strong()
+                    .color(Color32::from_rgb(255, 220, 100)),
+            );
+
+            ui.separator();
+
+            egui::Grid::new("conflict_compare_grid")
+                .num_columns(3)
+                .spacing([14.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("");
+                    ui.label(RichText::new(i18n.t("dialogs.conflict_size")).strong());
+                    ui.label(RichText::new(i18n.t("dialogs.conflict_modified")).strong());
+                    ui.end_row();
+
+                    if let Some(ref dst) = state.destination {
+                        ui.label(RichText::new(i18n.t("dialogs.conflict_dest")).strong().color(Color32::from_rgb(255, 160, 120)));
+                        ui.label(format!("{} ({} B)", format_size(dst.size, DECIMAL), dst.size));
+                        ui.label(format_conflict_time(dst.modified));
+                        ui.end_row();
+                    }
+
+                    if let Some(ref src) = state.source {
+                        ui.label(RichText::new(i18n.t("dialogs.conflict_source")).strong().color(Color32::from_rgb(120, 220, 255)));
+                        ui.label(format!("{} ({} B)", format_size(src.size, DECIMAL), src.size));
+                        ui.label(format_conflict_time(src.modified));
+                        ui.end_row();
+                    }
+                });
+
+            if state.show_rename_input {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(i18n.t("dialogs.rename_prompt"));
+                    let resp = ui.text_edit_singleline(&mut state.rename_input);
+                    resp.request_focus();
+                    let trimmed = state.rename_input.trim().to_string();
+                    if (ui.add_enabled(!trimmed.is_empty(), egui::Button::new(i18n.t("dialogs.conflict_rename_apply"))).clicked()
+                        || ui.input(|i| i.key_pressed(Key::Enter)))
+                        && !trimmed.is_empty()
+                    {
+                        chosen = Some(ConflictResolution::Rename(trimmed));
+                    }
+                });
+            }
+
+            ui.separator();
+
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(RichText::new(i18n.t("dialogs.conflict_overwrite")).strong()).clicked() {
+                    chosen = Some(ConflictResolution::Overwrite);
+                }
+                if ui.button(i18n.t("dialogs.conflict_overwrite_all")).clicked() {
+                    chosen = Some(ConflictResolution::OverwriteAll);
+                }
+                if ui.button(i18n.t("dialogs.conflict_overwrite_older")).clicked() {
+                    chosen = Some(ConflictResolution::OverwriteOlder);
+                }
+                if ui.button(i18n.t("dialogs.conflict_skip")).clicked() {
+                    chosen = Some(ConflictResolution::Skip);
+                }
+                if ui.button(i18n.t("dialogs.conflict_skip_all")).clicked() {
+                    chosen = Some(ConflictResolution::SkipAll);
+                }
+                if ui.button(i18n.t("dialogs.conflict_rename")).clicked() {
+                    state.show_rename_input = !state.show_rename_input;
+                }
+                if ui.button(RichText::new(i18n.t("dialogs.btn_cancel")).color(Color32::from_rgb(255, 120, 120))).clicked()
+                    || ui.input(|i| i.key_pressed(Key::Escape))
+                {
+                    chosen = Some(ConflictResolution::Cancel);
+                }
+            });
+        });
+
+    if let Some(res) = chosen {
+        if let Some(tx) = state.reply_tx.take() {
+            let _ = tx.send(res);
+        }
+        state.is_open = false;
+        state.source = None;
+        state.destination = None;
+        state.show_rename_input = false;
+    }
 }
 
 

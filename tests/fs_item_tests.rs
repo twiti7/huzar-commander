@@ -23,5 +23,36 @@ fn test_from_path() {
     assert_eq!(item.ext, "toml");
     assert!(!item.is_dir);
     assert!(!item.is_parent);
+    assert!(!item.is_symlink);
     assert!(item.size > 0);
+}
+
+#[test]
+fn test_symlink_from_path_handling() {
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_fs_item_symlink_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let target = temp_dir.join("target.txt");
+    std::fs::write(&target, "hello symlink").unwrap();
+    let link_path = temp_dir.join("link.txt");
+
+    #[cfg(unix)]
+    let link_res = std::os::unix::fs::symlink(&target, &link_path);
+    #[cfg(windows)]
+    let link_res = std::os::windows::fs::symlink_file(&target, &link_path);
+
+    if link_res.is_ok() {
+        let item = FileItem::from_path(&link_path).expect("Valid symlink should be read");
+        assert!(item.is_symlink);
+        assert!(!item.is_dir);
+        assert_eq!(item.size, 13);
+
+        // Remove target to create a broken symlink — FileItem::from_path must still return it
+        std::fs::remove_file(&target).unwrap();
+        let broken = FileItem::from_path(&link_path).expect("Broken symlink should remain visible");
+        assert!(broken.is_symlink);
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

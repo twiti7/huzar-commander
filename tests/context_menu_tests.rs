@@ -24,6 +24,7 @@ fn make_test_panel() -> PanelState {
         modified: None,
         is_hidden: false,
         is_readonly: false,
+        is_symlink: false,
     };
     let item2 = FileItem {
         name: "a.txt".to_string(),
@@ -35,6 +36,7 @@ fn make_test_panel() -> PanelState {
         modified: None,
         is_hidden: false,
         is_readonly: false,
+        is_symlink: false,
     };
     let item3 = FileItem {
         name: "b.txt".to_string(),
@@ -46,6 +48,7 @@ fn make_test_panel() -> PanelState {
         modified: None,
         is_hidden: false,
         is_readonly: false,
+        is_symlink: false,
     };
     let item4 = FileItem {
         name: "c.txt".to_string(),
@@ -57,6 +60,7 @@ fn make_test_panel() -> PanelState {
         modified: None,
         is_hidden: false,
         is_readonly: false,
+        is_symlink: false,
     };
 
     let all = vec![parent, item1, item2, item3, item4];
@@ -85,6 +89,13 @@ fn make_test_panel() -> PanelState {
         calculated_dirs: HashSet::new(),
         dir_size_tx,
         dir_size_rx,
+        history_back: Vec::new(),
+        history_forward: Vec::new(),
+        is_editing_path: false,
+        path_edit_text: String::new(),
+        focus_path_edit: false,
+        quick_search: String::new(),
+        quick_search_time: None,
     };
     panel.recalculate_totals();
     panel
@@ -106,6 +117,7 @@ fn test_context_menu_state_lifecycle_and_hit_testing() {
         modified: None,
         is_hidden: false,
         is_readonly: false,
+        is_symlink: false,
     };
 
     state.open_for_item(

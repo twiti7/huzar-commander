@@ -7,7 +7,12 @@ use crate::ui::state::ProgressUiState;
 use crate::worker::{IoWorker, QueueStateSnapshot};
 
 /// Wykres prędkości w czasie (neonowa fala cyan z poświatą)
-pub fn render_speed_graph(ui: &mut egui::Ui, history: &VecDeque<f32>, current_speed: f32) {
+pub fn render_speed_graph(
+    ui: &mut egui::Ui,
+    history: &VecDeque<f32>,
+    current_speed: f32,
+    i18n: &I18n,
+) {
     let desired_size = egui::vec2(ui.available_width(), 80.0);
     let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     let painter = ui.painter_at(rect);
@@ -56,7 +61,8 @@ pub fn render_speed_graph(ui: &mut egui::Ui, history: &VecDeque<f32>, current_sp
     }
 
     // Etykieta lewy górny róg: Szczyt
-    let max_str = format!("Szczyt: {}/s", format_size(max_speed as u64, DECIMAL));
+    let max_speed_str = format_size(max_speed as u64, DECIMAL);
+    let max_str = i18n.t_fmt("queue.peak_speed", &[("speed", &max_speed_str)]);
     painter.text(
         rect.left_top() + egui::vec2(6.0, 4.0),
         egui::Align2::LEFT_TOP,
@@ -107,11 +113,13 @@ pub fn render_progress_dialog(
 
             if queue_snapshot.total_tasks > 1 {
                 ui.horizontal(|ui| {
-                    let q_badge = format!(
-                        "🔄 KOLEJKA: Zadanie {} z {} (w kolejce pozostało: {})",
-                        queue_snapshot.active_index,
-                        queue_snapshot.total_tasks,
-                        queue_snapshot.pending_tasks.len()
+                    let q_badge = i18n.t_fmt(
+                        "queue.queue_badge",
+                        &[
+                            ("index", &queue_snapshot.active_index.to_string()),
+                            ("total", &queue_snapshot.total_tasks.to_string()),
+                            ("pending", &queue_snapshot.pending_tasks.len().to_string()),
+                        ],
                     );
                     ui.label(RichText::new(q_badge).color(Color32::from_rgb(0, 210, 255)).strong());
                 });
@@ -132,11 +140,9 @@ pub fn render_progress_dialog(
             ui.add(egui::ProgressBar::new(file_ratio).show_percentage());
 
             ui.horizontal(|ui| {
-                let cur_file_info = format!(
-                    "Plik: {} / {}",
-                    format_size(state.file_bytes_done, DECIMAL),
-                    format_size(state.file_bytes_total, DECIMAL)
-                );
+                let done_s = format_size(state.file_bytes_done, DECIMAL);
+                let total_s = format_size(state.file_bytes_total, DECIMAL);
+                let cur_file_info = i18n.t_fmt("queue.file_progress", &[("done", &done_s), ("total", &total_s)]);
                 ui.label(RichText::new(cur_file_info).size(11.0).color(Color32::LIGHT_GRAY));
             });
 
@@ -154,12 +160,18 @@ pub fn render_progress_dialog(
             ui.add(egui::ProgressBar::new(total_ratio).show_percentage());
 
             ui.horizontal(|ui| {
-                let total_info = format!(
-                    "Razem: {} / {} (element {} z {})",
-                    format_size(state.bytes_done, DECIMAL),
-                    format_size(state.bytes_total, DECIMAL),
-                    state.items_done.min(state.items_total),
-                    state.items_total
+                let done_s = format_size(state.bytes_done, DECIMAL);
+                let total_s = format_size(state.bytes_total, DECIMAL);
+                let items_done_s = state.items_done.min(state.items_total).to_string();
+                let items_total_s = state.items_total.to_string();
+                let total_info = i18n.t_fmt(
+                    "queue.total_progress",
+                    &[
+                        ("done", &done_s),
+                        ("total", &total_s),
+                        ("items_done", &items_done_s),
+                        ("items_total", &items_total_s),
+                    ],
                 );
                 ui.label(RichText::new(total_info).size(11.0).color(Color32::LIGHT_GRAY));
             });
@@ -194,8 +206,7 @@ pub fn render_progress_dialog(
                 ui.add_space(20.0);
 
                 ui.vertical(|ui| {
-                    let time_lbl = if i18n.language() == crate::i18n::Language::Pl { "Czas trwania:" } else { "Elapsed:" };
-                    ui.label(RichText::new(time_lbl).size(11.0).color(Color32::GRAY));
+                    ui.label(RichText::new(i18n.t("queue.elapsed")).size(11.0).color(Color32::GRAY));
                     ui.label(RichText::new(elapsed_str).color(Color32::WHITE).monospace());
                 });
             });
@@ -203,9 +214,8 @@ pub fn render_progress_dialog(
             ui.add_space(4.0);
 
             // Wykres prędkości
-            let chart_lbl = if i18n.language() == crate::i18n::Language::Pl { "Wykres prędkości w czasie:" } else { "Speed chart over time:" };
-            ui.label(RichText::new(chart_lbl).size(11.0).color(Color32::GRAY));
-            render_speed_graph(ui, &state.speed_history, state.speed_bps);
+            ui.label(RichText::new(i18n.t("queue.speed_chart")).size(11.0).color(Color32::GRAY));
+            render_speed_graph(ui, &state.speed_history, state.speed_bps, i18n);
 
             ui.add_space(6.0);
 
@@ -237,7 +247,7 @@ pub fn render_progress_dialog(
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let cancel_lbl = if i18n.language() == crate::i18n::Language::Pl { "Anuluj operację" } else { "Cancel operation" };
+                    let cancel_lbl = i18n.t("queue.cancel_operation");
                     let cancel_btn = egui::Button::new(RichText::new(cancel_lbl).color(Color32::from_rgb(255, 120, 120)))
                         .fill(Color32::from_rgb(45, 25, 30));
                     if ui.add(cancel_btn).clicked() {
@@ -273,11 +283,7 @@ pub fn render_queue_dialog(
             let queue_len = queue_snapshot.pending_tasks.len() + if queue_snapshot.active_task.is_some() { 1 } else { 0 };
 
             ui.horizontal(|ui| {
-                let tasks_lbl = if i18n.language() == crate::i18n::Language::Pl {
-                    format!("Liczba zadań w kolejce: {}", queue_len)
-                } else {
-                    format!("Tasks in queue: {}", queue_len)
-                };
+                let tasks_lbl = i18n.t_fmt("queue.tasks_count", &[("count", &queue_len.to_string())]);
                 ui.label(RichText::new(tasks_lbl).strong().size(14.0));
 
                 let speed_str = format!("{}/s", format_size(state.speed_bps as u64, DECIMAL));
@@ -285,11 +291,7 @@ pub fn render_queue_dialog(
 
                 if let Some(eta) = state.eta_secs {
                     let eta_str = format!("{:02}:{:02}:{:02}", eta / 3600, (eta % 3600) / 60, eta % 60);
-                    let eta_lbl = if i18n.language() == crate::i18n::Language::Pl {
-                        format!("Łączny czas ETA: {}", eta_str)
-                    } else {
-                        format!("Total ETA: {}", eta_str)
-                    };
+                    let eta_lbl = i18n.t_fmt("queue.total_eta", &[("eta", &eta_str)]);
                     ui.label(RichText::new(eta_lbl).color(Color32::YELLOW).strong());
                 }
             });
@@ -301,19 +303,12 @@ pub fn render_queue_dialog(
                 0.0
             };
             ui.add(egui::ProgressBar::new(queue_ratio).show_percentage());
-            let queue_prog_lbl = if i18n.language() == crate::i18n::Language::Pl {
-                format!(
-                    "Postęp łączny kolejki: {} / {}",
-                    format_size(state.queue_bytes_done, DECIMAL),
-                    format_size(state.queue_total_bytes, DECIMAL)
-                )
-            } else {
-                format!(
-                    "Total queue progress: {} / {}",
-                    format_size(state.queue_bytes_done, DECIMAL),
-                    format_size(state.queue_total_bytes, DECIMAL)
-                )
-            };
+            let q_done_s = format_size(state.queue_bytes_done, DECIMAL);
+            let q_total_s = format_size(state.queue_total_bytes, DECIMAL);
+            let queue_prog_lbl = i18n.t_fmt(
+                "queue.total_queue_progress",
+                &[("done", &q_done_s), ("total", &q_total_s)],
+            );
             ui.label(RichText::new(queue_prog_lbl).size(11.0).color(Color32::GRAY));
 
             ui.separator();
@@ -355,8 +350,7 @@ pub fn render_queue_dialog(
             }
 
             // Lista oczekujących zadań
-            let pending_lbl = if i18n.language() == crate::i18n::Language::Pl { "Oczekujące w kolejce:" } else { "Pending in queue:" };
-            ui.label(RichText::new(pending_lbl).strong());
+            ui.label(RichText::new(i18n.t("queue.pending_header")).strong());
             egui::ScrollArea::vertical()
                 .id_salt("dialog_queue_pending_scroll")
                 .max_height(120.0)
@@ -369,8 +363,10 @@ pub fn render_queue_dialog(
                             ui.label(RichText::new(format!("#{}.", idx + 1)).color(Color32::YELLOW));
                             ui.label(RichText::new(&task.title).strong());
                             ui.label(RichText::new(&task.detail).color(Color32::GRAY));
-                            let size_str = format_size(task.total_bytes, DECIMAL);
-                            ui.label(RichText::new(format!("(~{})", size_str)).color(Color32::LIGHT_GRAY));
+                            if task.total_bytes > 0 {
+                                let size_str = format_size(task.total_bytes, DECIMAL);
+                                ui.label(RichText::new(format!("(~{})", size_str)).color(Color32::LIGHT_GRAY));
+                            }
                         });
                     }
                 }
@@ -385,8 +381,7 @@ pub fn render_queue_dialog(
                     worker.toggle_pause();
                 }
 
-                let cancel_all_lbl = if i18n.language() == crate::i18n::Language::Pl { "⏹ Anuluj całą kolejkę" } else { "⏹ Cancel all" };
-                if ui.button(RichText::new(cancel_all_lbl).color(Color32::from_rgb(255, 120, 120))).clicked() {
+                if ui.button(RichText::new(i18n.t("queue.cancel_all")).color(Color32::from_rgb(255, 120, 120))).clicked() {
                     worker.cancel_all();
                     state.is_open = false;
                     state.in_background = false;
@@ -418,9 +413,15 @@ pub fn render_background_tasks_bar(
         ui.horizontal(|ui| {
             let queue_count = queue_snapshot.pending_tasks.len() + if queue_snapshot.active_task.is_some() { 1 } else { 0 };
             let queue_tag = if queue_count > 1 {
-                format!("🔄 KOLEJKA [zadanie {}/{}]:", queue_snapshot.active_index, queue_snapshot.total_tasks)
+                i18n.t_fmt(
+                    "queue.bg_queue_tag",
+                    &[
+                        ("index", &queue_snapshot.active_index.to_string()),
+                        ("total", &queue_snapshot.total_tasks.to_string()),
+                    ],
+                )
             } else {
-                "🔄 ZADANIE W TLE:".to_string()
+                i18n.t("queue.bg_task_tag").to_string()
             };
             ui.label(RichText::new(queue_tag).strong().color(Color32::from_rgb(0, 190, 255)));
 
@@ -444,8 +445,7 @@ pub fn render_background_tasks_bar(
             ui.add(egui::Label::new(RichText::new(&state.current_item).color(Color32::from_rgb(150, 180, 220))).truncate());
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let cancel_all_lbl = if i18n.language() == crate::i18n::Language::Pl { "✕ Anuluj wszystko" } else { "✕ Cancel all" };
-                let cancel_btn = egui::Button::new(RichText::new(cancel_all_lbl).color(Color32::from_rgb(255, 120, 120)))
+                let cancel_btn = egui::Button::new(RichText::new(i18n.t("queue.cancel_all")).color(Color32::from_rgb(255, 120, 120)))
                     .fill(Color32::from_rgb(45, 25, 30));
                 if ui.add(cancel_btn).clicked() {
                     worker.cancel();
@@ -471,8 +471,7 @@ pub fn render_background_tasks_bar(
                     state.show_queue_dialog = true;
                 }
 
-                let show_lbl = if i18n.language() == crate::i18n::Language::Pl { "🔍 Wykres" } else { "🔍 Chart" };
-                let show_btn = egui::Button::new(RichText::new(show_lbl).strong().color(Color32::from_rgb(100, 210, 255)))
+                let show_btn = egui::Button::new(RichText::new(i18n.t("queue.btn_chart")).strong().color(Color32::from_rgb(100, 210, 255)))
                     .fill(Color32::from_rgb(20, 35, 60));
                 if ui.add(show_btn).clicked() {
                     state.in_background = false;

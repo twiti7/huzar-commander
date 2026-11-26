@@ -204,3 +204,107 @@ fn test_properties_dialog_state_async_calculation() {
     assert!(!state.is_calculating);
     assert!(state.rx.is_none());
 }
+
+#[test]
+fn test_viewer_search_forward_backward_and_utf8() {
+    use std::sync::atomic::AtomicBool;
+    use huzar_commander::opener::TextEncoding;
+    use huzar_commander::ui::state::search_file_offset;
+
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_viewer_search_utf8_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let file_path = temp_dir.join("big_utf8.txt");
+
+    // Build a >150 KB file with Polish diacritics across 128 KB block boundary
+    let mut data = String::from("poczatek: Żółć pierwsza ");
+    data.push_str(&"x".repeat(130 * 1024));
+    data.push_str(" srodek: żółć druga ");
+    data.push_str(&"y".repeat(20 * 1024));
+    data.push_str(" koniec: ŻÓŁĆ trzecia\n");
+    std::fs::write(&file_path, &data).unwrap();
+
+    let cancel = AtomicBool::new(false);
+    let m1 = search_file_offset(&file_path, "żółć", 0, true, TextEncoding::Utf8, &cancel)
+        .unwrap()
+        .expect("Should find first occurrence");
+    let m2 = search_file_offset(&file_path, "żółć", m1, true, TextEncoding::Utf8, &cancel)
+        .unwrap()
+        .expect("Should find second occurrence across 128KB boundary");
+    let m3 = search_file_offset(&file_path, "żółć", m2, true, TextEncoding::Utf8, &cancel)
+        .unwrap()
+        .expect("Should find third occurrence");
+    assert!(m1 < m2 && m2 < m3);
+
+    // Search backward from m3 -> must hit m2, then from m2 -> must hit m1
+    let back_to_2 = search_file_offset(&file_path, "ŻÓŁĆ", m3, false, TextEncoding::Utf8, &cancel)
+        .unwrap()
+        .expect("Backward search from m3 must find m2");
+    assert_eq!(back_to_2, m2);
+
+    let back_to_1 = search_file_offset(&file_path, "żółć", back_to_2, false, TextEncoding::Utf8, &cancel)
+        .unwrap()
+        .expect("Backward search from m2 must find m1");
+    assert_eq!(back_to_1, m1);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_viewer_encoding_windows1250_and_utf16() {
+    use huzar_commander::opener::{decode_bytes_with_encoding, detect_encoding, TextEncoding};
+
+    // Windows-1250 bytes: "zażółć" -> z, a, 0xBF(ż), 0xF3(ó), 0xB3(ł), 0xE6(ć)
+    let win1250_bytes = vec![b'z', b'a', 0xBF, 0xF3, 0xB3, 0xE6];
+    let decoded_win = decode_bytes_with_encoding(&win1250_bytes, TextEncoding::Windows1250);
+    assert_eq!(decoded_win, "zażółć");
+
+    // UTF-16 LE with BOM
+    let mut utf16_bytes = vec![0xFF, 0xFE];
+    for unit in "Cześć\n".encode_utf16() {
+        utf16_bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    assert_eq!(detect_encoding(&utf16_bytes), TextEncoding::Utf16Le);
+
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_viewer_utf16_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let utf16_file = temp_dir.join("utf16_note.txt");
+    std::fs::write(&utf16_file, &utf16_bytes).unwrap();
+
+    let mut viewer = ViewerWindowState::default();
+    viewer.open_file("utf16".to_string(), utf16_file).unwrap();
+    // Must not be misclassified as Hex binary despite 0x00 bytes!
+    assert_eq!(viewer.mode, ViewerMode::Text);
+    assert_eq!(viewer.encoding, TextEncoding::Utf16Le);
+    assert!(viewer.content.contains("Cześć"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_viewer_code_mode_and_tokenizer() {
+    use std::path::Path;
+    use huzar_commander::ui::code_viewer::{detect_code_lang, tokenize_code_line, CodeLang, TokenKind};
+
+    assert_eq!(detect_code_lang(Some(Path::new("main.rs"))), CodeLang::Rust);
+    assert_eq!(detect_code_lang(Some(Path::new("app.py"))), CodeLang::Python);
+
+    let tokens = tokenize_code_line(r#"let x: String = "abc"; // hi 42"#, CodeLang::Rust);
+    assert!(tokens.iter().any(|(k, t)| *k == TokenKind::Keyword && t == "let"));
+    assert!(tokens.iter().any(|(k, t)| *k == TokenKind::TypeName && t == "String"));
+    assert!(tokens.iter().any(|(k, t)| *k == TokenKind::StringLit && t == "\"abc\""));
+    assert!(tokens.iter().any(|(k, t)| *k == TokenKind::Comment && t == "// hi 42"));
+
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_viewer_code_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let rs_file = temp_dir.join("sample.rs");
+    std::fs::write(&rs_file, "fn main() {}\n").unwrap();
+
+    let mut viewer = ViewerWindowState::default();
+    viewer.open_file("sample.rs".to_string(), rs_file).unwrap();
+    assert_eq!(viewer.mode, ViewerMode::Code);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

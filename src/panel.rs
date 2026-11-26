@@ -7,13 +7,452 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 
+use crate::archive::{is_supported_archive, list_archive_entries};
 use crate::fs_item::{FileItem, SortColumn, SortOrder};
-use crate::zip_support::{is_zip_file, list_zip_entries, ZipLocation};
+use crate::zip_support::ZipLocation;
+
+/// Parses a Windows UNC path (`\\server`, `\\server\share`, `\\server\share\sub...`)
+/// into `(server, Option<share>, remaining_segments)`.
+/// Device/extended namespaces (`\\?\...`, `\\.\...`) are excluded.
+pub fn parse_unc_parts(path: &Path) -> Option<(String, Option<String>, Vec<String>)> {
+    let raw = path.to_string_lossy();
+    let trimmed = raw.trim();
+    if trimmed.starts_with(r"\\?\")
+        || trimmed.starts_with(r"\\.\")
+        || (cfg!(windows) && (trimmed.starts_with("//?/") || trimmed.starts_with("//./")))
+    {
+        return None;
+    }
+    let has_unc_prefix = trimmed.starts_with(r"\\") || (cfg!(windows) && trimmed.starts_with("//"));
+    if !has_unc_prefix {
+        return None;
+    }
+
+    let rest = trimmed.trim_start_matches(['\\', '/']);
+    let parts: Vec<&str> = rest
+        .split(['\\', '/'])
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    let server = parts[0].to_string();
+    let share = parts.get(1).map(|s| (*s).to_string());
+    let sub = parts.iter().skip(2).map(|s| (*s).to_string()).collect();
+    Some((server, share, sub))
+}
+
+/// Returns `true` if `path` is a UNC path (`\\server...`).
+pub fn is_unc_path(path: &Path) -> bool {
+    parse_unc_parts(path).is_some()
+}
+
+/// Returns `Some(server)` iff `path` points to a UNC server root (`\\server` or `\\server\`).
+pub fn unc_server_root(path: &Path) -> Option<String> {
+    parse_unc_parts(path).and_then(|(server, share, _)| if share.is_none() { Some(server) } else { None })
+}
+
+/// Normalizes a UNC path string (resolving `.` and `..` across share/subfolders).
+pub fn normalize_unc_path(raw: &str) -> Option<PathBuf> {
+    let (server, share_opt, rest) = parse_unc_parts(Path::new(raw))?;
+    let mut stack: Vec<String> = Vec::new();
+    if let Some(share) = share_opt {
+        stack.push(share);
+    }
+    for part in rest {
+        if part == "." {
+            continue;
+        }
+        if part == ".." {
+            stack.pop();
+        } else {
+            stack.push(part);
+        }
+    }
+    if stack.is_empty() {
+        Some(PathBuf::from(format!(r"\\{}", server)))
+    } else {
+        Some(PathBuf::from(format!(r"\\{}\{}", server, stack.join(r"\"))))
+    }
+}
+
+/// Returns the parent directory for upward (`..`) navigation, including stepping from
+/// `\\server\share` up to `\\server`.
+pub fn parent_dir_for_navigation(path: &Path) -> Option<PathBuf> {
+    if let Some((server, share_opt, rest)) = parse_unc_parts(path) {
+        let share = share_opt?;
+        if rest.is_empty() {
+            return Some(PathBuf::from(format!(r"\\{}", server)));
+        }
+        let mut p = PathBuf::from(format!(r"\\{}\{}", server, share));
+        if rest.len() > 1 {
+            for seg in &rest[..rest.len() - 1] {
+                p.push(seg);
+            }
+        }
+        return Some(p);
+    }
+    path.parent().map(|p| p.to_path_buf())
+}
+
+/// Returns the directory segment name used to re-focus the cursor after stepping up (`..`).
+pub fn dir_name_for_go_up(path: &Path) -> Option<String> {
+    if let Some((_, share_opt, rest)) = parse_unc_parts(path) {
+        return rest.last().cloned().or(share_opt);
+    }
+    path.file_name().map(|s| s.to_string_lossy().to_string())
+}
+
+#[cfg(windows)]
+mod win_unc {
+    use std::collections::HashSet;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Path, PathBuf};
+
+    use crate::fs_item::FileItem;
+
+    use super::parse_unc_parts;
+
+    const NERR_SUCCESS: u32 = 0;
+    const NO_ERROR: u32 = 0;
+    const ERROR_MORE_DATA: u32 = 234;
+    const ERROR_NO_MORE_ITEMS: u32 = 259;
+    const MAX_PREFERRED_LENGTH: u32 = u32::MAX;
+    const STYPE_DISKTREE: u32 = 0;
+    const STYPE_MASK: u32 = 0x0000_FFFF;
+    const STYPE_SPECIAL: u32 = 0x8000_0000;
+
+    const RESOURCE_GLOBALNET: u32 = 0x0000_0002;
+    const RESOURCETYPE_DISK: u32 = 0x0000_0001;
+    const RESOURCEDISPLAYTYPE_SERVER: u32 = 0x0000_0002;
+    const RESOURCEUSAGE_CONTAINER: u32 = 0x0000_0002;
+
+    #[repr(C)]
+    struct ShareInfo1 {
+        shi1_netname: *mut u16,
+        shi1_type: u32,
+        shi1_remark: *mut u16,
+    }
+
+    #[repr(C)]
+    struct NetResourceW {
+        dw_scope: u32,
+        dw_type: u32,
+        dw_display_type: u32,
+        dw_usage: u32,
+        lp_local_name: *mut u16,
+        lp_remote_name: *mut u16,
+        lp_comment: *mut u16,
+        lp_provider: *mut u16,
+    }
+
+    #[link(name = "netapi32")]
+    extern "system" {
+        fn NetShareEnum(
+            servername: *const u16,
+            level: u32,
+            bufptr: *mut *mut u8,
+            prefmaxlen: u32,
+            entriesread: *mut u32,
+            totalentries: *mut u32,
+            resume_handle: *mut u32,
+        ) -> u32;
+
+        fn NetApiBufferFree(buffer: *mut std::ffi::c_void) -> u32;
+    }
+
+    #[link(name = "mpr")]
+    extern "system" {
+        fn WNetOpenEnumW(
+            dw_scope: u32,
+            dw_type: u32,
+            dw_usage: u32,
+            lp_net_resource: *const NetResourceW,
+            lph_enum: *mut *mut std::ffi::c_void,
+        ) -> u32;
+
+        fn WNetEnumResourceW(
+            h_enum: *mut std::ffi::c_void,
+            lpc_count: *mut u32,
+            lp_buffer: *mut std::ffi::c_void,
+            lp_buffer_size: *mut u32,
+        ) -> u32;
+
+        fn WNetCloseEnum(h_enum: *mut std::ffi::c_void) -> u32;
+    }
+
+    fn to_wide_null(s: &str) -> Vec<u16> {
+        let mut wide: Vec<u16> = std::ffi::OsStr::new(s).encode_wide().collect();
+        wide.push(0);
+        wide
+    }
+
+    unsafe fn wide_ptr_to_string(ptr: *const u16) -> String {
+        if ptr.is_null() {
+            return String::new();
+        }
+        let mut len = 0usize;
+        while len < 4096 && *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        OsString::from_wide(slice).to_string_lossy().to_string()
+    }
+
+    fn make_share_item(server: &str, name: String, is_hidden: bool) -> FileItem {
+        FileItem {
+            name: name.clone(),
+            ext: String::new(),
+            path: PathBuf::from(format!(r"\\{}\{}", server, name)),
+            is_dir: true,
+            is_parent: false,
+            size: 0,
+            modified: None,
+            is_hidden,
+            is_readonly: false,
+            is_symlink: false,
+        }
+    }
+
+    fn enumerate_shares_netapi(server: &str) -> Result<Vec<FileItem>, String> {
+        let server_wide = to_wide_null(&format!(r"\\{}", server));
+        let mut resume_handle: u32 = 0;
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+
+        for _ in 0..64 {
+            let mut buf_ptr: *mut u8 = std::ptr::null_mut();
+            let mut entries_read: u32 = 0;
+            let mut total_entries: u32 = 0;
+
+            let status = unsafe {
+                NetShareEnum(
+                    server_wide.as_ptr(),
+                    1,
+                    &mut buf_ptr,
+                    MAX_PREFERRED_LENGTH,
+                    &mut entries_read,
+                    &mut total_entries,
+                    &mut resume_handle,
+                )
+            };
+
+            if status == NERR_SUCCESS || status == ERROR_MORE_DATA {
+                if !buf_ptr.is_null() && entries_read > 0 {
+                    let entries = unsafe {
+                        std::slice::from_raw_parts(
+                            buf_ptr as *const ShareInfo1,
+                            entries_read as usize,
+                        )
+                    };
+                    for entry in entries {
+                        if (entry.shi1_type & STYPE_MASK) != STYPE_DISKTREE {
+                            continue;
+                        }
+                        let name = unsafe { wide_ptr_to_string(entry.shi1_netname) };
+                        if name.is_empty() {
+                            continue;
+                        }
+                        let is_hidden =
+                            (entry.shi1_type & STYPE_SPECIAL) != 0 || name.ends_with('$');
+                        if seen.insert(name.to_lowercase()) {
+                            items.push(make_share_item(server, name, is_hidden));
+                        }
+                    }
+                }
+                if !buf_ptr.is_null() {
+                    unsafe {
+                        NetApiBufferFree(buf_ptr as *mut std::ffi::c_void);
+                    }
+                }
+                if status == NERR_SUCCESS {
+                    return Ok(items);
+                }
+            } else {
+                if !buf_ptr.is_null() {
+                    unsafe {
+                        NetApiBufferFree(buf_ptr as *mut std::ffi::c_void);
+                    }
+                }
+                return Err(format!(
+                    "{} (os error {})",
+                    std::io::Error::from_raw_os_error(status as i32),
+                    status
+                ));
+            }
+        }
+
+        Ok(items)
+    }
+
+    fn enumerate_shares_wnet(server: &str) -> Result<Vec<FileItem>, String> {
+        let mut wide_server = to_wide_null(&format!(r"\\{}", server));
+        let root_nr = NetResourceW {
+            dw_scope: RESOURCE_GLOBALNET,
+            dw_type: RESOURCETYPE_DISK,
+            dw_display_type: RESOURCEDISPLAYTYPE_SERVER,
+            dw_usage: RESOURCEUSAGE_CONTAINER,
+            lp_local_name: std::ptr::null_mut(),
+            lp_remote_name: wide_server.as_mut_ptr(),
+            lp_comment: std::ptr::null_mut(),
+            lp_provider: std::ptr::null_mut(),
+        };
+
+        let mut handle: *mut std::ffi::c_void = std::ptr::null_mut();
+        let open_status = unsafe {
+            WNetOpenEnumW(
+                RESOURCE_GLOBALNET,
+                RESOURCETYPE_DISK,
+                0,
+                &root_nr,
+                &mut handle,
+            )
+        };
+        if open_status != NO_ERROR {
+            return Err(format!(
+                "{} (os error {})",
+                std::io::Error::from_raw_os_error(open_status as i32),
+                open_status
+            ));
+        }
+
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        let mut buf: Vec<u64> = vec![0u64; 4096];
+
+        for _ in 0..64 {
+            let mut count: u32 = u32::MAX;
+            let mut buf_size: u32 = (buf.len() * std::mem::size_of::<u64>()) as u32;
+            let status = unsafe {
+                WNetEnumResourceW(
+                    handle,
+                    &mut count,
+                    buf.as_mut_ptr() as *mut std::ffi::c_void,
+                    &mut buf_size,
+                )
+            };
+
+            if status == ERROR_MORE_DATA {
+                let needed_words = (buf_size as usize).div_ceil(std::mem::size_of::<u64>());
+                let next_words = needed_words.max(buf.len().saturating_mul(2));
+                buf.resize(next_words, 0);
+                continue;
+            }
+
+            if status == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+
+            if status != NO_ERROR {
+                unsafe {
+                    WNetCloseEnum(handle);
+                }
+                return Err(format!(
+                    "{} (os error {})",
+                    std::io::Error::from_raw_os_error(status as i32),
+                    status
+                ));
+            }
+
+            let entries = unsafe {
+                std::slice::from_raw_parts(buf.as_ptr() as *const NetResourceW, count as usize)
+            };
+            for entry in entries {
+                let remote = unsafe { wide_ptr_to_string(entry.lp_remote_name) };
+                if let Some((_, Some(share), _)) = parse_unc_parts(Path::new(&remote)) {
+                    if share.is_empty()
+                        || share.eq_ignore_ascii_case("IPC$")
+                        || share.eq_ignore_ascii_case("print$")
+                    {
+                        continue;
+                    }
+                    let is_hidden = share.ends_with('$');
+                    if seen.insert(share.to_lowercase()) {
+                        items.push(make_share_item(server, share, is_hidden));
+                    }
+                }
+            }
+        }
+
+        unsafe {
+            WNetCloseEnum(handle);
+        }
+        Ok(items)
+    }
+
+    pub fn list_unc_shares(server: &str) -> Result<Vec<FileItem>, String> {
+        let netapi_res = enumerate_shares_netapi(server);
+        if let Ok(ref items) = netapi_res {
+            if !items.is_empty() {
+                return netapi_res;
+            }
+        }
+
+        match enumerate_shares_wnet(server) {
+            Ok(items) => Ok(items),
+            Err(_) => match netapi_res {
+                Ok(items) => Ok(items),
+                Err(err) => Err(err),
+            },
+        }
+    }
+}
+
+#[cfg(windows)]
+fn list_unc_shares(server: &str) -> Result<Vec<FileItem>, String> {
+    win_unc::list_unc_shares(server)
+}
+
+#[cfg(not(windows))]
+fn list_unc_shares(server: &str) -> Result<Vec<FileItem>, String> {
+    Err(format!(
+        "UNC share enumeration for \\\\{} is only supported on Windows",
+        server
+    ))
+}
+
+fn read_directory_entries(
+    path: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<FileItem>, String> {
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return Ok(Vec::new());
+    }
+
+    if let Some(server) = unc_server_root(path) {
+        return list_unc_shares(&server);
+    }
+
+    let mut new_items = Vec::new();
+    if let Some(parent) = parent_dir_for_navigation(path) {
+        new_items.push(FileItem::new_parent(parent));
+    }
+
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return Ok(Vec::new());
+                }
+                if let Some(item) = FileItem::from_path(&entry.path()) {
+                    new_items.push(item);
+                }
+            }
+            Ok(new_items)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
 
 #[derive(Clone)]
 pub struct DirLoadHandle {
     pub target_path: PathBuf,
     pub old_dir_name: Option<String>,
+    pub zip_location: Option<ZipLocation>,
+    pub preserve_selection: bool,
+    pub record_history: bool,
     pub rx: Receiver<Result<Vec<FileItem>, String>>,
     pub cancel: Arc<AtomicBool>,
     pub started_at: Instant,
@@ -56,6 +495,13 @@ pub struct PanelState {
     pub calculated_dirs: HashSet<PathBuf>,
     pub dir_size_tx: Sender<(PathBuf, u64, usize)>,
     pub dir_size_rx: Receiver<(PathBuf, u64, usize)>,
+    pub history_back: Vec<PathBuf>,
+    pub history_forward: Vec<PathBuf>,
+    pub is_editing_path: bool,
+    pub path_edit_text: String,
+    pub focus_path_edit: bool,
+    pub quick_search: String,
+    pub quick_search_time: Option<Instant>,
 }
 
 impl PanelState {
@@ -86,9 +532,97 @@ impl PanelState {
             calculated_dirs: HashSet::new(),
             dir_size_tx,
             dir_size_rx,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            is_editing_path: false,
+            path_edit_text: String::new(),
+            focus_path_edit: false,
+            quick_search: String::new(),
+            quick_search_time: None,
         };
         panel.refresh();
         panel
+    }
+
+    /// Constructs a `PanelState` without an initial synchronous directory scan.
+    pub fn new_deferred(initial_path: PathBuf, show_hidden: bool) -> Self {
+        let (dir_size_tx, dir_size_rx) = crossbeam_channel::unbounded();
+        Self {
+            current_path: initial_path,
+            all_items: Vec::new(),
+            items: Vec::new(),
+            selected_paths: HashSet::new(),
+            cursor_idx: 0,
+            scroll_to_cursor: true,
+            sort_column: SortColumn::Name,
+            sort_order: SortOrder::Ascending,
+            filter: String::new(),
+            is_filter_open: false,
+            show_hidden,
+            custom_title: None,
+            zip_location: None,
+            total_bytes: 0,
+            total_files: 0,
+            total_dirs: 0,
+            selected_bytes: 0,
+            selected_count: 0,
+            error_message: None,
+            loading_handle: None,
+            calculating_dir_sizes: HashSet::new(),
+            calculated_dirs: HashSet::new(),
+            dir_size_tx,
+            dir_size_rx,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            is_editing_path: false,
+            path_edit_text: String::new(),
+            focus_path_edit: false,
+            quick_search: String::new(),
+            quick_search_time: None,
+        }
+    }
+
+    /// Clones this panel for a new duplicated tab with fresh channels and reset transient state.
+    pub fn clone_for_new_tab(&self) -> Self {
+        let (dir_size_tx, dir_size_rx) = crossbeam_channel::unbounded();
+        let cursor_idx = if self.items.is_empty() {
+            0
+        } else {
+            self.cursor_idx.min(self.items.len() - 1)
+        };
+        Self {
+            current_path: self.current_path.clone(),
+            all_items: self.all_items.clone(),
+            items: self.items.clone(),
+            selected_paths: HashSet::new(),
+            cursor_idx,
+            scroll_to_cursor: true,
+            sort_column: self.sort_column,
+            sort_order: self.sort_order,
+            filter: String::new(),
+            is_filter_open: false,
+            show_hidden: self.show_hidden,
+            custom_title: None,
+            zip_location: self.zip_location.clone(),
+            total_bytes: self.total_bytes,
+            total_files: self.total_files,
+            total_dirs: self.total_dirs,
+            selected_bytes: 0,
+            selected_count: 0,
+            error_message: None,
+            loading_handle: None,
+            calculating_dir_sizes: HashSet::new(),
+            calculated_dirs: HashSet::new(),
+            dir_size_tx,
+            dir_size_rx,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            is_editing_path: false,
+            path_edit_text: String::new(),
+            focus_path_edit: false,
+            quick_search: String::new(),
+            quick_search_time: None,
+        }
     }
 
     pub fn display_path(&self) -> String {
@@ -106,7 +640,7 @@ impl PanelState {
     }
 
     pub fn enter_zip(&mut self, zip_path: PathBuf) {
-        if is_zip_file(&zip_path) {
+        if is_supported_archive(&zip_path) {
             self.zip_location = Some(ZipLocation::new(zip_path.clone()));
             self.current_path = zip_path;
             self.selected_paths.clear();
@@ -167,7 +701,7 @@ impl PanelState {
             };
             new_items.push(FileItem::new_parent(parent_path));
 
-            match list_zip_entries(&loc.archive_path, &loc.internal_dir) {
+            match list_archive_entries(&loc.archive_path, &loc.internal_dir) {
                 Ok(entries) => {
                     new_items.extend(entries);
                 }
@@ -176,18 +710,10 @@ impl PanelState {
                 }
             }
         } else {
-            // Normal file system directory browsing
-            if let Some(parent) = self.current_path.parent() {
-                new_items.push(FileItem::new_parent(parent.to_path_buf()));
-            }
-
-            match fs::read_dir(&self.current_path) {
+            // Normal file system or UNC share root directory browsing
+            match read_directory_entries(&self.current_path, None) {
                 Ok(entries) => {
-                    for entry in entries.flatten() {
-                        if let Some(item) = FileItem::from_path(&entry.path()) {
-                            new_items.push(item);
-                        }
-                    }
+                    new_items = entries;
                 }
                 Err(e) => {
                     self.error_message = Some(format!("Błąd odczytu: {}", e));
@@ -205,13 +731,140 @@ impl PanelState {
             self.zip_location = None;
         }
 
-        if new_path.is_dir() {
+        if new_path.is_dir() || unc_server_root(&new_path).is_some() {
+            if new_path != self.current_path && !self.current_path.as_os_str().is_empty() {
+                let prev = self.current_path.clone();
+                self.push_history(prev);
+            }
             self.custom_title = None;
+            self.quick_search_clear();
             self.current_path = new_path;
             self.selected_paths.clear();
             self.cursor_idx = 0;
             self.scroll_to_cursor = true;
             self.refresh();
+        }
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        !self.history_back.is_empty()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        !self.history_forward.is_empty()
+    }
+
+    pub fn push_history(&mut self, prev: PathBuf) {
+        if self.history_back.last() == Some(&prev) {
+            return;
+        }
+        self.history_back.push(prev);
+        if self.history_back.len() > 50 {
+            self.history_back.remove(0);
+        }
+        self.history_forward.clear();
+    }
+
+    pub fn navigate_back_async(
+        &mut self,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> bool {
+        if let Some(target) = self.history_back.pop() {
+            if self.zip_location.is_none()
+                && self.custom_title.is_none()
+                && !self.current_path.as_os_str().is_empty()
+                && self.history_forward.last() != Some(&self.current_path)
+            {
+                self.history_forward.push(self.current_path.clone());
+            }
+            self.start_loading_dir_internal(target, None, false, repaint_signal);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn navigate_forward_async(
+        &mut self,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> bool {
+        if let Some(target) = self.history_forward.pop() {
+            if self.zip_location.is_none()
+                && self.custom_title.is_none()
+                && !self.current_path.as_os_str().is_empty()
+                && self.history_back.last() != Some(&self.current_path)
+            {
+                self.history_back.push(self.current_path.clone());
+            }
+            self.start_loading_dir_internal(target, None, false, repaint_signal);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn start_path_edit(&mut self) {
+        self.is_editing_path = true;
+        self.path_edit_text = self.current_path.to_string_lossy().to_string();
+        self.focus_path_edit = true;
+    }
+
+    pub fn cancel_path_edit(&mut self) {
+        self.is_editing_path = false;
+        self.focus_path_edit = false;
+    }
+
+    pub fn quick_search_push(&mut self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let expired = self
+            .quick_search_time
+            .map(|t| t.elapsed() > std::time::Duration::from_millis(1500))
+            .unwrap_or(true);
+        if expired {
+            self.quick_search.clear();
+        }
+        self.quick_search.push_str(text);
+        self.quick_search_time = Some(Instant::now());
+
+        let needle = self.quick_search.to_lowercase();
+        let found_idx = self
+            .items
+            .iter()
+            .position(|it| !it.is_parent && it.name.to_lowercase().starts_with(&needle))
+            .or_else(|| {
+                self.items
+                    .iter()
+                    .position(|it| !it.is_parent && it.name.to_lowercase().contains(&needle))
+            });
+
+        if let Some(idx) = found_idx {
+            self.cursor_idx = idx;
+            self.scroll_to_cursor = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn quick_search_clear(&mut self) {
+        self.quick_search.clear();
+        self.quick_search_time = None;
+    }
+
+    pub fn quick_search_active(&self) -> Option<&str> {
+        if self.quick_search.is_empty() {
+            return None;
+        }
+        let fresh = self
+            .quick_search_time
+            .map(|t| t.elapsed() <= std::time::Duration::from_millis(1500))
+            .unwrap_or(false);
+        if fresh {
+            Some(self.quick_search.as_str())
+        } else {
+            None
         }
     }
 
@@ -228,12 +881,8 @@ impl PanelState {
             return;
         }
 
-        if let Some(parent) = self.current_path.parent() {
-            let old_dir_name = self
-                .current_path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string());
-            let parent_buf = parent.to_path_buf();
+        if let Some(parent_buf) = parent_dir_for_navigation(&self.current_path) {
+            let old_dir_name = dir_name_for_go_up(&self.current_path);
             self.change_dir(parent_buf);
 
             // Put cursor on the directory we just came out from
@@ -276,6 +925,16 @@ impl PanelState {
         old_dir_name: Option<String>,
         repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
     ) {
+        self.start_loading_dir_internal(new_path, old_dir_name, true, repaint_signal);
+    }
+
+    fn start_loading_dir_internal(
+        &mut self,
+        new_path: PathBuf,
+        old_dir_name: Option<String>,
+        record_history: bool,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
         // Przerwij ewentualne poprzednie wczytywanie w toku
         self.cancel_loading();
 
@@ -294,25 +953,138 @@ impl PanelState {
         let path_to_scan = new_path.clone();
 
         std::thread::spawn(move || {
+            let result = read_directory_entries(&path_to_scan, Some(cancel_thread.as_ref()));
+            if !cancel_thread.load(Ordering::Relaxed) {
+                let _ = tx.send(result);
+                if let Some(sig) = repaint_signal {
+                    sig();
+                }
+            }
+        });
+
+        self.loading_handle = Some(DirLoadHandle {
+            target_path: new_path,
+            old_dir_name,
+            zip_location: None,
+            preserve_selection: false,
+            record_history,
+            rx,
+            cancel,
+            started_at: Instant::now(),
+        });
+    }
+
+    pub fn refresh_async(
+        &mut self,
+        focus_item: Option<String>,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        if self.custom_title.is_some() {
+            return;
+        }
+        let desired_focus = focus_item.or_else(|| {
+            self.items
+                .get(self.cursor_idx)
+                .filter(|it| !it.is_parent)
+                .map(|it| it.name.clone())
+        });
+
+        if let Some(loc) = self.zip_location.clone() {
+            self.start_loading_zip_location(loc, desired_focus, true, repaint_signal);
+            return;
+        }
+
+        let target_path = self.current_path.clone();
+        self.cancel_loading();
+        self.error_message = None;
+        self.calculating_dir_sizes.clear();
+        self.calculated_dirs.clear();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_thread = Arc::clone(&cancel);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let path_to_scan = target_path.clone();
+
+        std::thread::spawn(move || {
+            let result = read_directory_entries(&path_to_scan, Some(cancel_thread.as_ref()));
+            if !cancel_thread.load(Ordering::Relaxed) {
+                let _ = tx.send(result);
+                if let Some(sig) = repaint_signal {
+                    sig();
+                }
+            }
+        });
+
+        self.loading_handle = Some(DirLoadHandle {
+            target_path,
+            old_dir_name: desired_focus,
+            zip_location: None,
+            preserve_selection: true,
+            record_history: false,
+            rx,
+            cancel,
+            started_at: Instant::now(),
+        });
+    }
+
+    pub fn enter_zip_async(
+        &mut self,
+        zip_path: PathBuf,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        if is_supported_archive(&zip_path) {
+            let loc = ZipLocation::new(zip_path);
+            self.start_loading_zip_location(loc, None, false, repaint_signal);
+        }
+    }
+
+    pub fn enter_zip_dir_async(
+        &mut self,
+        dir_name: &str,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        if let Some(mut loc) = self.zip_location.clone() {
+            loc.enter_subdir(dir_name);
+            self.start_loading_zip_location(loc, None, false, repaint_signal);
+        }
+    }
+
+    fn start_loading_zip_location(
+        &mut self,
+        loc: ZipLocation,
+        old_dir_name: Option<String>,
+        preserve_selection: bool,
+        repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        self.cancel_loading();
+        self.custom_title = None;
+        self.error_message = None;
+        self.calculating_dir_sizes.clear();
+        self.calculated_dirs.clear();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_thread = Arc::clone(&cancel);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let loc_thread = loc.clone();
+        let target_path = loc.archive_path.clone();
+
+        std::thread::spawn(move || {
             if cancel_thread.load(Ordering::Relaxed) {
                 return;
             }
-
-            let mut new_items = Vec::new();
-            if let Some(parent) = path_to_scan.parent() {
-                new_items.push(FileItem::new_parent(parent.to_path_buf()));
-            }
-
-            match std::fs::read_dir(&path_to_scan) {
+            let parent_path = if loc_thread.internal_dir.is_empty() {
+                loc_thread
+                    .archive_path
+                    .parent()
+                    .unwrap_or(&loc_thread.archive_path)
+                    .to_path_buf()
+            } else {
+                loc_thread.archive_path.clone()
+            };
+            let mut new_items = vec![FileItem::new_parent(parent_path)];
+            match list_archive_entries(&loc_thread.archive_path, &loc_thread.internal_dir) {
                 Ok(entries) => {
-                    for entry in entries.flatten() {
-                        if cancel_thread.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        if let Some(item) = FileItem::from_path(&entry.path()) {
-                            new_items.push(item);
-                        }
-                    }
+                    new_items.extend(entries);
                     if !cancel_thread.load(Ordering::Relaxed) {
                         let _ = tx.send(Ok(new_items));
                         if let Some(sig) = repaint_signal {
@@ -322,7 +1094,7 @@ impl PanelState {
                 }
                 Err(e) => {
                     if !cancel_thread.load(Ordering::Relaxed) {
-                        let _ = tx.send(Err(e.to_string()));
+                        let _ = tx.send(Err(e));
                         if let Some(sig) = repaint_signal {
                             sig();
                         }
@@ -332,8 +1104,11 @@ impl PanelState {
         });
 
         self.loading_handle = Some(DirLoadHandle {
-            target_path: new_path,
+            target_path,
             old_dir_name,
+            zip_location: Some(loc),
+            preserve_selection,
+            record_history: false,
             rx,
             cancel,
             started_at: Instant::now(),
@@ -341,16 +1116,37 @@ impl PanelState {
     }
 
     pub fn poll_loading(&mut self) -> Option<Result<PathBuf, String>> {
-        let handle = self.loading_handle.as_ref()?;
-        match handle.rx.try_recv() {
+        let recv_res = self.loading_handle.as_ref()?.rx.try_recv();
+        match recv_res {
             Ok(Ok(new_items)) => {
-                let target_path = handle.target_path.clone();
-                let old_dir_name = handle.old_dir_name.clone();
-                self.loading_handle = None;
+                let handle = self.loading_handle.take()?;
+                let target_path = handle.target_path;
+                let old_dir_name = handle.old_dir_name;
 
+                if handle.record_history
+                    && handle.zip_location.is_none()
+                    && self.zip_location.is_none()
+                    && self.custom_title.is_none()
+                    && target_path != self.current_path
+                    && !self.current_path.as_os_str().is_empty()
+                {
+                    let prev = self.current_path.clone();
+                    self.push_history(prev);
+                }
+                if target_path != self.current_path {
+                    self.quick_search_clear();
+                }
+
+                self.zip_location = handle.zip_location;
                 self.current_path = target_path.clone();
                 self.all_items = new_items;
-                self.selected_paths.clear();
+                if handle.preserve_selection {
+                    let valid_paths: HashSet<PathBuf> =
+                        self.all_items.iter().map(|it| it.path.clone()).collect();
+                    self.selected_paths.retain(|p| valid_paths.contains(p));
+                } else {
+                    self.selected_paths.clear();
+                }
                 self.cursor_idx = 0;
                 self.scroll_to_cursor = true;
                 self.sort_items();
@@ -366,7 +1162,6 @@ impl PanelState {
                 Some(Ok(target_path))
             }
             Ok(Err(err)) => {
-                let _target_path = handle.target_path.clone();
                 self.loading_handle = None;
                 self.error_message = Some(format!("Błąd odczytu: {}", err));
                 Some(Err(err))
@@ -380,24 +1175,26 @@ impl PanelState {
     }
 
     pub fn go_up_async(&mut self, repaint_signal: Option<Arc<dyn Fn() + Send + Sync>>) {
-        if let Some(ref mut loc) = self.zip_location {
+        if let Some(mut loc) = self.zip_location.clone() {
             if loc.go_up() {
-                self.selected_paths.clear();
-                self.cursor_idx = 0;
-                self.scroll_to_cursor = true;
-                self.refresh();
+                self.start_loading_zip_location(loc, None, false, repaint_signal);
             } else {
-                self.exit_zip();
+                let parent = loc
+                    .archive_path
+                    .parent()
+                    .unwrap_or(&loc.archive_path)
+                    .to_path_buf();
+                let archive_name = loc
+                    .archive_path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string());
+                self.start_loading_dir(parent, archive_name, repaint_signal);
             }
             return;
         }
 
-        if let Some(parent) = self.current_path.parent() {
-            let old_dir_name = self
-                .current_path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string());
-            let parent_buf = parent.to_path_buf();
+        if let Some(parent_buf) = parent_dir_for_navigation(&self.current_path) {
+            let old_dir_name = dir_name_for_go_up(&self.current_path);
             self.start_loading_dir(parent_buf, old_dir_name, repaint_signal);
         }
     }
@@ -573,6 +1370,7 @@ impl PanelState {
 
             for entry in walkdir::WalkDir::new(&target_path)
                 .min_depth(1)
+                .follow_links(false)
                 .into_iter()
                 .flatten()
             {
@@ -666,6 +1464,7 @@ impl PanelState {
                 modified: res.modified,
                 is_hidden: false,
                 is_readonly: false,
+                is_symlink: false,
             };
             new_items.push(item);
         }
@@ -746,6 +1545,81 @@ impl PanelState {
         self.selected_bytes = sel_bytes;
         self.selected_count = sel_count;
     }
+}
+
+/// Compares non-directory files across `left` and `right` panels by name, size, and modified time,
+/// selecting missing, size-mismatched, or newer (`> 2s`) files in each panel.
+pub fn compare_directories(left: &mut PanelState, right: &mut PanelState) -> (usize, usize) {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    left.selected_paths.clear();
+    right.selected_paths.clear();
+
+    let key_for = |name: &str| -> String {
+        if cfg!(windows) {
+            name.to_lowercase()
+        } else {
+            name.to_string()
+        }
+    };
+
+    let left_map: HashMap<String, &FileItem> = left
+        .items
+        .iter()
+        .filter(|it| !it.is_parent && !it.is_dir)
+        .map(|it| (key_for(&it.name), it))
+        .collect();
+    let right_map: HashMap<String, &FileItem> = right
+        .items
+        .iter()
+        .filter(|it| !it.is_parent && !it.is_dir)
+        .map(|it| (key_for(&it.name), it))
+        .collect();
+
+    let tol = Duration::from_secs(2);
+
+    for (k, l_item) in &left_map {
+        let should_select = match right_map.get(k) {
+            None => true,
+            Some(r_item) => {
+                if l_item.size != r_item.size {
+                    true
+                } else {
+                    match (l_item.modified, r_item.modified) {
+                        (Some(lm), Some(rm)) => lm > rm + tol,
+                        _ => false,
+                    }
+                }
+            }
+        };
+        if should_select {
+            left.selected_paths.insert(l_item.path.clone());
+        }
+    }
+
+    for (k, r_item) in &right_map {
+        let should_select = match left_map.get(k) {
+            None => true,
+            Some(l_item) => {
+                if r_item.size != l_item.size {
+                    true
+                } else {
+                    match (r_item.modified, l_item.modified) {
+                        (Some(rm), Some(lm)) => rm > lm + tol,
+                        _ => false,
+                    }
+                }
+            }
+        };
+        if should_select {
+            right.selected_paths.insert(r_item.path.clone());
+        }
+    }
+
+    left.recalculate_totals();
+    right.recalculate_totals();
+    (left.selected_paths.len(), right.selected_paths.len())
 }
 
 pub fn matches_filter(name: &str, filter: &str) -> bool {

@@ -17,13 +17,18 @@ fn load_app_icon() -> egui::IconData {
 
 fn main() -> eframe::Result<()> {
     let icon = load_app_icon();
+    let cfg = huzar_commander::config::AppConfig::load();
+    let initial_size = match (cfg.session.window_width, cfg.session.window_height) {
+        (Some(w), Some(h)) if w >= 800.0 && h >= 500.0 => [w, h],
+        _ => [1100.0, 700.0],
+    };
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Huzar Commander")
             .with_icon(icon)
-            .with_inner_size([1100.0, 700.0])
+            .with_inner_size(initial_size)
             .with_min_inner_size([800.0, 500.0])
-            .with_maximized(true),
+            .with_maximized(cfg.session.window_maximized),
         ..Default::default()
     };
 

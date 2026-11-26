@@ -166,3 +166,56 @@ fn test_search_non_utf8_encoding() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_truncate_preview_utf8_boundaries() {
+    use huzar_commander::search::truncate_preview;
+
+    let short = "zażółć gęślą jaźń 🚀";
+    assert_eq!(truncate_preview(short, 120), short);
+
+    // 118 ASCII bytes + multibyte Polish chars and emoji crossing byte 120
+    let mut line = "a".repeat(118);
+    line.push_str("ąęćłńóśźż🚀");
+    let truncated = truncate_preview(&line, 120);
+    assert!(truncated.ends_with("..."));
+    assert_eq!(truncated.chars().count(), 123);
+    assert!(truncated.starts_with(&format!("{}ąę", "a".repeat(118))));
+}
+
+#[test]
+fn test_search_utf8_multibyte_long_line_no_panic() {
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_search_utf8_boundary_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let file = temp_dir.join("utf8_long.txt");
+    // Place multibyte chars across the 120-byte mark, then keyword beyond 120 chars
+    let content = format!("{}ąęćłńóśźż🚀_więcej_tekstu_szukany_klucz\n", "x".repeat(119));
+    fs::write(&file, content).unwrap();
+
+    let params = SearchParams {
+        start_dir: temp_dir.clone(),
+        mask: "*.txt".to_string(),
+        text: "szukany_klucz".to_string(),
+        case_sensitive: false,
+        recursive: false,
+    };
+
+    let handle = start_search(params);
+    let mut found = Vec::new();
+    while let Ok(msg) = handle.rx.recv_timeout(Duration::from_secs(3)) {
+        match msg {
+            SearchMessage::Found(item) => found.push(item),
+            SearchMessage::Finished(_) => break,
+            _ => {}
+        }
+    }
+
+    assert_eq!(found.len(), 1);
+    let preview = found[0].match_line.as_ref().unwrap();
+    assert!(preview.ends_with("..."));
+    assert_eq!(preview.chars().count(), 123);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

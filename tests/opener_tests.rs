@@ -178,3 +178,33 @@ fn test_resolve_editor_command_for_code() {
         assert!(resolved.is_file(), "Resolved code editor must be a valid file");
     }
 }
+
+#[test]
+fn test_open_zip_entry_rejects_traversal_name() {
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_open_zip_safe_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let archive = temp_dir.join("dummy.zip");
+
+    assert!(open_zip_entry(&archive, "..").is_err());
+    assert!(open_zip_entry(&archive, "sub/..").is_err());
+    assert!(open_zip_entry(&archive, "").is_err());
+    assert!(open_zip_entry(&archive, "evil:name.txt").is_err());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cleanup_preview_temp_dir_at() {
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_cleanup_preview_{}", std::process::id()));
+    let nested = temp_dir.join("sub");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("preview.txt"), b"temp").unwrap();
+    assert!(temp_dir.exists());
+
+    cleanup_preview_temp_dir_at(&temp_dir);
+    assert!(!temp_dir.exists());
+
+    // Calling again on non-existent directory must not panic
+    cleanup_preview_temp_dir_at(&temp_dir);
+}

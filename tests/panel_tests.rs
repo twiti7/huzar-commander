@@ -16,6 +16,7 @@ fn create_test_panel() -> PanelState {
         modified: None,
         is_hidden: false,
         is_readonly: false,
+        is_symlink: false,
     };
     let dir_a = FileItem {
         name: "AlphaDir".to_string(),
@@ -27,6 +28,7 @@ fn create_test_panel() -> PanelState {
         modified: None,
         is_hidden: false,
         is_readonly: false,
+        is_symlink: false,
     };
     let file_z = FileItem {
         name: "zeta.txt".to_string(),
@@ -38,6 +40,7 @@ fn create_test_panel() -> PanelState {
         modified: None,
         is_hidden: false,
         is_readonly: false,
+        is_symlink: false,
     };
     let file_a = FileItem {
         name: "alpha.txt".to_string(),
@@ -49,6 +52,7 @@ fn create_test_panel() -> PanelState {
         modified: None,
         is_hidden: false,
         is_readonly: false,
+        is_symlink: false,
     };
 
     let all = vec![parent, dir_b, dir_a, file_z, file_a];
@@ -77,6 +81,13 @@ fn create_test_panel() -> PanelState {
         calculated_dirs: HashSet::new(),
         dir_size_tx,
         dir_size_rx,
+        history_back: Vec::new(),
+        history_forward: Vec::new(),
+        is_editing_path: false,
+        path_edit_text: String::new(),
+        focus_path_edit: false,
+        quick_search: String::new(),
+        quick_search_time: None,
     }
 }
 
@@ -184,6 +195,7 @@ fn test_hidden_files_filtering() {
         modified: None,
         is_hidden: true,
         is_readonly: false,
+        is_symlink: false,
     };
     panel.all_items.push(hidden);
     panel.apply_filter();
@@ -414,6 +426,239 @@ fn test_space_multiple_dirs_rapid_selection() {
 
     assert_eq!(total_finished, 2);
     assert!(!panel.has_calculating_dirs());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_async_refresh_preserves_selection_and_cursor() {
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_async_refresh_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let f1 = temp_dir.join("alpha.txt");
+    let f2 = temp_dir.join("beta.txt");
+    std::fs::write(&f1, "a").unwrap();
+    std::fs::write(&f2, "b").unwrap();
+
+    let mut panel = PanelState::new(temp_dir.clone());
+    let alpha_idx = panel.items.iter().position(|it| it.name == "alpha.txt").unwrap();
+    let beta_idx = panel.items.iter().position(|it| it.name == "beta.txt").unwrap();
+    panel.toggle_select(alpha_idx);
+    panel.cursor_idx = beta_idx;
+
+    // Add a third file on disk and refresh asynchronously
+    std::fs::write(temp_dir.join("gamma.txt"), "c").unwrap();
+    panel.refresh_async(None, None);
+    assert!(panel.is_loading());
+
+    let start = std::time::Instant::now();
+    let mut loaded = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if let Some(res) = panel.poll_loading() {
+            assert!(res.is_ok());
+            loaded = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(loaded);
+    assert!(panel.selected_paths.contains(&f1));
+    assert_eq!(panel.items[panel.cursor_idx].name, "beta.txt");
+    assert!(panel.items.iter().any(|it| it.name == "gamma.txt"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_async_enter_zip() {
+    use std::io::Write;
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_async_zip_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let zip_path = temp_dir.join("sample.zip");
+    {
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("inside.txt", options).unwrap();
+        writer.write_all(b"zip hello").unwrap();
+        writer.finish().unwrap();
+    }
+
+    let mut panel = PanelState::new(temp_dir.clone());
+    panel.enter_zip_async(zip_path.clone(), None);
+    assert!(panel.is_loading());
+
+    let start = std::time::Instant::now();
+    let mut loaded = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if let Some(res) = panel.poll_loading() {
+            assert!(res.is_ok());
+            loaded = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(loaded);
+    assert!(panel.is_in_zip());
+    assert!(panel.items.iter().any(|it| it.name == "inside.txt"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_panel_navigation_history_back_forward() {
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_history_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let dir_a = temp_dir.join("dir_a");
+    let dir_b = temp_dir.join("dir_b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+
+    let mut panel = PanelState::new(temp_dir.clone());
+    assert!(!panel.can_go_back());
+    assert!(!panel.can_go_forward());
+
+    panel.change_dir(dir_a.clone());
+    panel.change_dir(dir_b.clone());
+    assert!(panel.can_go_back());
+    assert!(!panel.can_go_forward());
+    assert_eq!(panel.current_path, dir_b);
+
+    // Go back asynchronously to dir_a
+    assert!(panel.navigate_back_async(None));
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if panel.poll_loading().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(panel.current_path, dir_a);
+    assert!(panel.can_go_back());
+    assert!(panel.can_go_forward());
+
+    // Go forward asynchronously back to dir_b
+    assert!(panel.navigate_forward_async(None));
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if panel.poll_loading().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(panel.current_path, dir_b);
+    assert!(!panel.can_go_forward());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_panel_quick_search_prefix_and_substring() {
+    let mut panel = create_test_panel();
+    panel.sort_items();
+
+    // Prefix match: "ze" jumps to "zeta.txt"
+    assert!(panel.quick_search_push("z"));
+    assert!(panel.quick_search_push("e"));
+    assert_eq!(panel.items[panel.cursor_idx].name, "zeta.txt");
+    assert_eq!(panel.quick_search_active(), Some("ze"));
+
+    // Clear and test substring fallback: "eta" matches "BetaDir" (first non-parent containing "eta")
+    panel.quick_search_clear();
+    assert_eq!(panel.quick_search_active(), None);
+    assert!(panel.quick_search_push("eta"));
+    assert_eq!(panel.items[panel.cursor_idx].name, "BetaDir");
+}
+
+#[test]
+fn test_unc_path_parsing_normalization_and_parent() {
+    use std::path::{Path, PathBuf};
+    use huzar_commander::panel::{
+        dir_name_for_go_up, is_unc_path, normalize_unc_path, parent_dir_for_navigation,
+        parse_unc_parts, unc_server_root,
+    };
+
+    assert_eq!(
+        parse_unc_parts(Path::new(r"\\TRUENAS")),
+        Some(("TRUENAS".to_string(), None, Vec::new()))
+    );
+    assert_eq!(unc_server_root(Path::new(r"\\TRUENAS")), Some("TRUENAS".to_string()));
+    assert_eq!(unc_server_root(Path::new(r"\\TRUENAS\")), Some("TRUENAS".to_string()));
+    assert_eq!(normalize_unc_path(r"\\TRUENAS\"), Some(PathBuf::from(r"\\TRUENAS")));
+    assert_eq!(parent_dir_for_navigation(Path::new(r"\\TRUENAS")), None);
+
+    assert_eq!(
+        parse_unc_parts(Path::new(r"\\TRUENAS\media")),
+        Some(("TRUENAS".to_string(), Some("media".to_string()), Vec::new()))
+    );
+    assert_eq!(unc_server_root(Path::new(r"\\TRUENAS\media")), None);
+    assert_eq!(
+        normalize_unc_path(r"\\TRUENAS\media\"),
+        Some(PathBuf::from(r"\\TRUENAS\media"))
+    );
+    assert_eq!(
+        parent_dir_for_navigation(Path::new(r"\\TRUENAS\media")),
+        Some(PathBuf::from(r"\\TRUENAS"))
+    );
+    assert_eq!(
+        dir_name_for_go_up(Path::new(r"\\TRUENAS\media")),
+        Some("media".to_string())
+    );
+
+    assert_eq!(
+        parent_dir_for_navigation(Path::new(r"\\TRUENAS\media\films\2025")),
+        Some(PathBuf::from(r"\\TRUENAS\media\films"))
+    );
+    assert_eq!(
+        dir_name_for_go_up(Path::new(r"\\TRUENAS\media\films\2025")),
+        Some("2025".to_string())
+    );
+
+    assert_eq!(
+        normalize_unc_path(r"\\TRUENAS\media\.."),
+        Some(PathBuf::from(r"\\TRUENAS"))
+    );
+
+    assert_eq!(parse_unc_parts(Path::new(r"\\?\C:\Workspace")), None);
+    assert_eq!(parse_unc_parts(Path::new(r"\\.\pipe\test")), None);
+    assert!(!is_unc_path(Path::new(r"C:\Workspace")));
+}
+
+#[test]
+fn test_compare_directories_selects_missing_and_newer() {
+    use huzar_commander::panel::compare_directories;
+
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_compare_dirs_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let left_dir = temp_dir.join("left");
+    let right_dir = temp_dir.join("right");
+    std::fs::create_dir_all(&left_dir).unwrap();
+    std::fs::create_dir_all(&right_dir).unwrap();
+
+    std::fs::write(left_dir.join("same.txt"), "12345").unwrap();
+    std::fs::write(right_dir.join("same.txt"), "12345").unwrap();
+
+    std::fs::write(left_dir.join("only_left.txt"), "abc").unwrap();
+    std::fs::write(right_dir.join("only_right.txt"), "xyz").unwrap();
+
+    std::fs::write(left_dir.join("diff_size.txt"), "short").unwrap();
+    std::fs::write(right_dir.join("diff_size.txt"), "much_longer").unwrap();
+
+    let mut left = PanelState::new(left_dir.clone());
+    let mut right = PanelState::new(right_dir.clone());
+
+    let (l_cnt, r_cnt) = compare_directories(&mut left, &mut right);
+    assert_eq!(l_cnt, 2);
+    assert_eq!(r_cnt, 2);
+    assert!(left.selected_paths.contains(&left_dir.join("only_left.txt")));
+    assert!(left.selected_paths.contains(&left_dir.join("diff_size.txt")));
+    assert!(!left.selected_paths.contains(&left_dir.join("same.txt")));
+    assert!(right.selected_paths.contains(&right_dir.join("only_right.txt")));
+    assert!(right.selected_paths.contains(&right_dir.join("diff_size.txt")));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
