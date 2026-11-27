@@ -481,15 +481,11 @@ fn render_normal_file_menu(
 
     menu_separator(ui);
 
-    if single && crate::zip_support::is_zip_file(&item.path) {
+    if single && crate::archive::is_supported_archive(&item.path) {
         if main_row(ui, state, icons::EXTRACT, i18n.t("ctx_menu.extract_here"), "") {
             action = Some(ContextMenuAction::ExtractZipHere(item.path.clone()));
         }
-        let stem = item
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "archive".to_string());
+        let stem = crate::archive::ArchiveFormat::strip_archive_stem(&item.path);
         let extract_folder_lbl = i18n.t_fmt("ctx_menu.extract_to_folder", &[("folder", &stem)]);
         if main_row(ui, state, icons::FOLDER, &extract_folder_lbl, "") {
             action = Some(ContextMenuAction::ExtractZipToFolder(item.path.clone()));

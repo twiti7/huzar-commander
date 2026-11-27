@@ -4,9 +4,34 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::i18n::Language;
+
+fn lock_unpoison<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[derive(Debug, Clone)]
+pub struct ConflictFileInfo {
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictResolution {
+    Overwrite,
+    OverwriteAll,
+    OverwriteOlder,
+    Skip,
+    SkipAll,
+    Rename(String),
+    Cancel,
+}
 
 #[derive(Debug, Clone)]
 pub enum WorkerCommand {
@@ -29,10 +54,14 @@ pub enum WorkerCommand {
         archive_path: PathBuf,
         target_dir: PathBuf,
         filter_prefix: Option<String>,
+        selected_entries: Vec<String>,
     },
     Rename {
         source: PathBuf,
         new_name: String,
+    },
+    BatchRename {
+        pairs: Vec<(PathBuf, PathBuf)>,
     },
     CreateZip {
         sources: Vec<PathBuf>,
@@ -112,6 +141,12 @@ pub enum WorkerEvent {
         task_id: u64,
         message: String,
     },
+    ConflictDetected {
+        task_id: u64,
+        source: ConflictFileInfo,
+        destination: ConflictFileInfo,
+        reply_tx: Sender<ConflictResolution>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -161,6 +196,7 @@ pub struct IoWorker {
     pub wake_condvar: Arc<Condvar>,
     pub event_tx: Sender<WorkerEvent>,
     pub repaint_signal: RepaintSignal,
+    pub language: Arc<Mutex<Language>>,
 }
 
 impl IoWorker {
@@ -175,6 +211,7 @@ impl IoWorker {
         let state = Arc::new(Mutex::new(WorkerQueueState::default()));
         let wake_condvar = Arc::new(Condvar::new());
         let repaint_signal: RepaintSignal = Arc::new(Mutex::new(None));
+        let language = Arc::new(Mutex::new(Language::Pl));
 
         let is_paused_thread = Arc::clone(&is_paused);
         let skip_current_thread = Arc::clone(&skip_current_flag);
@@ -183,6 +220,7 @@ impl IoWorker {
         let condvar_thread = Arc::clone(&wake_condvar);
         let event_tx_thread = event_tx.clone();
         let repaint_sig_thread = Arc::clone(&repaint_signal);
+        let lang_thread = Arc::clone(&language);
 
         // Worker execution loop
         thread::spawn(move || {
@@ -197,14 +235,14 @@ impl IoWorker {
 
             loop {
                 // 1. Wait for a task in pending_queue
-                let current_task = {
-                    let mut q = state_thread.lock().unwrap();
+                let (mut current_task, initial_items) = {
+                    let mut q = lock_unpoison(&state_thread);
                     while q.pending_queue.is_empty() {
                         q.active_task = None;
                         if cancel_all_thread.load(Ordering::Relaxed) {
                             cancel_all_thread.store(false, Ordering::Relaxed);
                         }
-                        q = condvar_thread.wait(q).unwrap();
+                        q = condvar_thread.wait(q).unwrap_or_else(|e| e.into_inner());
                     }
 
                     if cancel_all_thread.load(Ordering::Relaxed) {
@@ -218,15 +256,92 @@ impl IoWorker {
                         None => continue,
                     };
 
+                    let init_items = task.total_items;
                     q.active_task = Some(task.clone());
                     skip_current_thread.store(false, Ordering::SeqCst);
 
                     let snapshot = q.snapshot(is_paused_thread.load(Ordering::Relaxed));
                     send_event(WorkerEvent::QueueUpdated(snapshot));
-                    task
+                    (task, init_items)
                 };
 
-                // 2. Notify task started
+                // 2. Calculate exact totals in background thread (never on UI thread)
+                let (actual_items, actual_bytes) = calculate_command_totals_cancellable(
+                    &current_task.command,
+                    &skip_current_thread,
+                    &cancel_all_thread,
+                );
+
+                let scan_cancelled = cancel_all_thread.load(Ordering::Relaxed);
+                let scan_skipped = skip_current_thread.load(Ordering::Relaxed);
+                let lang = *lock_unpoison(&lang_thread);
+
+                if scan_cancelled {
+                    {
+                        let mut q = lock_unpoison(&state_thread);
+                        q.active_task = None;
+                        q.pending_queue.clear();
+                        q.total_tasks_counter = 0;
+                        q.completed_tasks_counter = 0;
+                        q.queue_total_items = 0;
+                        q.queue_items_done = 0;
+                        q.queue_total_bytes = 0;
+                        q.queue_bytes_done_base = 0;
+                    }
+                    send_event(WorkerEvent::QueueFinished {
+                        message: msg_cancelled(lang).to_string(),
+                    });
+                    continue;
+                }
+
+                if scan_skipped {
+                    let queue_is_empty = {
+                        let mut q = lock_unpoison(&state_thread);
+                        q.active_task = None;
+                        q.completed_tasks_counter += 1;
+                        q.queue_total_items = q.queue_total_items.saturating_sub(initial_items);
+                        if q.pending_queue.is_empty() {
+                            q.total_tasks_counter = 0;
+                            q.completed_tasks_counter = 0;
+                            q.queue_total_items = 0;
+                            q.queue_items_done = 0;
+                            q.queue_total_bytes = 0;
+                            q.queue_bytes_done_base = 0;
+                            true
+                        } else {
+                            let snapshot = q.snapshot(is_paused_thread.load(Ordering::Relaxed));
+                            send_event(WorkerEvent::QueueUpdated(snapshot));
+                            false
+                        }
+                    };
+                    skip_current_thread.store(false, Ordering::SeqCst);
+                    send_event(WorkerEvent::TaskFinished {
+                        task_id: current_task.id,
+                        message: msg_skipped_task(lang, &current_task.title),
+                    });
+                    if queue_is_empty {
+                        send_event(WorkerEvent::QueueFinished {
+                            message: msg_queue_finished(lang).to_string(),
+                        });
+                        let q = lock_unpoison(&state_thread);
+                        let snapshot = q.snapshot(false);
+                        send_event(WorkerEvent::QueueUpdated(snapshot));
+                    }
+                    continue;
+                }
+
+                {
+                    let mut q = lock_unpoison(&state_thread);
+                    current_task.total_items = actual_items;
+                    current_task.total_bytes = actual_bytes;
+                    q.queue_total_items = q.queue_total_items.saturating_sub(initial_items) + actual_items;
+                    q.queue_total_bytes = q.queue_total_bytes.saturating_add(actual_bytes);
+                    q.active_task = Some(current_task.clone());
+                    let snapshot = q.snapshot(is_paused_thread.load(Ordering::Relaxed));
+                    send_event(WorkerEvent::QueueUpdated(snapshot));
+                }
+
+                // 3. Notify task started
                 send_event(WorkerEvent::TaskStarted {
                     task_id: current_task.id,
                     title: current_task.title.clone(),
@@ -234,7 +349,7 @@ impl IoWorker {
                     total_bytes: current_task.total_bytes,
                 });
 
-                // 3. Progress tracker referencing shared state
+                // 4. Progress tracker referencing shared state
                 let mut tracker = QueueProgressTracker::new(
                     current_task.id,
                     current_task.total_items,
@@ -242,13 +357,15 @@ impl IoWorker {
                     Arc::clone(&state_thread),
                 );
 
-                // 4. Execute the task
+                // 5. Execute the task
                 let runtime_ctx = WorkerRuntimeContext {
                     is_paused: &is_paused_thread,
                     skip_current: &skip_current_thread,
                     cancel_all: &cancel_all_thread,
                     wake_condvar: &condvar_thread,
                     state: &state_thread,
+                    repaint_signal: &repaint_sig_thread,
+                    lang,
                 };
 
                 let res = execute_task(
@@ -263,9 +380,9 @@ impl IoWorker {
                 let is_cancel = cancel_all_thread.load(Ordering::Relaxed)
                     || res.as_ref().err().map(|e| e == "CANCEL").unwrap_or(false);
 
-                // 5. Update state counters
+                // 6. Update state counters
                 let queue_is_empty = {
-                    let mut q = state_thread.lock().unwrap();
+                    let mut q = lock_unpoison(&state_thread);
                     q.active_task = None;
                     q.completed_tasks_counter += 1;
 
@@ -296,15 +413,15 @@ impl IoWorker {
 
                 skip_current_thread.store(false, Ordering::SeqCst);
 
-                // 6. Notify completion / skip / cancel
+                // 7. Notify completion / skip / cancel
                 if is_cancel {
                     send_event(WorkerEvent::QueueFinished {
-                        message: "Operacje anulowane przez użytkownika".to_string(),
+                        message: msg_cancelled(lang).to_string(),
                     });
                 } else if is_skip {
                     send_event(WorkerEvent::TaskFinished {
                         task_id: current_task.id,
-                        message: format!("Pominięto zadanie: {}", current_task.title),
+                        message: msg_skipped_task(lang, &current_task.title),
                     });
                 } else {
                     match res {
@@ -325,9 +442,9 @@ impl IoWorker {
 
                 if queue_is_empty && !is_cancel {
                     send_event(WorkerEvent::QueueFinished {
-                        message: "Wszystkie zadania w kolejce zostały zakończone".to_string(),
+                        message: msg_queue_finished(lang).to_string(),
                     });
-                    let q = state_thread.lock().unwrap();
+                    let q = lock_unpoison(&state_thread);
                     let snapshot = q.snapshot(false);
                     send_event(WorkerEvent::QueueUpdated(snapshot));
                 }
@@ -345,6 +462,7 @@ impl IoWorker {
             wake_condvar,
             event_tx,
             repaint_signal,
+            language,
         };
 
         // Forward compatibility thread for control_tx
@@ -374,15 +492,16 @@ impl IoWorker {
     }
 
     pub fn enqueue(&self, cmd: WorkerCommand) {
-        let (items, bytes) = calculate_command_totals(&cmd);
-        let (title, detail) = describe_command(&cmd);
+        let items = initial_command_items(&cmd);
+        let lang = *lock_unpoison(&self.language);
+        let (title, detail) = describe_command(&cmd, lang);
 
         // Reset cancellation flags if a new task is added
         self.cancel_all_flag.store(false, Ordering::SeqCst);
         self.skip_current_flag.store(false, Ordering::SeqCst);
 
         let snapshot = {
-            let mut q = self.state.lock().unwrap();
+            let mut q = lock_unpoison(&self.state);
             if q.task_id_gen == 0 {
                 q.task_id_gen = 1;
             }
@@ -392,12 +511,11 @@ impl IoWorker {
                 detail,
                 command: cmd,
                 total_items: items,
-                total_bytes: bytes,
+                total_bytes: 0,
             };
             q.task_id_gen += 1;
             q.total_tasks_counter += 1;
             q.queue_total_items += items;
-            q.queue_total_bytes += bytes;
             q.pending_queue.push_back(task);
 
             q.snapshot(self.is_paused.load(Ordering::Relaxed))
@@ -412,13 +530,17 @@ impl IoWorker {
         self.wake_condvar.notify_all();
     }
 
+    pub fn set_language(&self, lang: Language) {
+        *lock_unpoison(&self.language) = lang;
+    }
+
     pub fn is_busy(&self) -> bool {
-        let q = self.state.lock().unwrap();
+        let q = lock_unpoison(&self.state);
         q.active_task.is_some() || !q.pending_queue.is_empty()
     }
 
     pub fn set_repaint_signal<F: Fn() + Send + Sync + 'static>(&self, callback: F) {
-        let mut sig = self.repaint_signal.lock().unwrap();
+        let mut sig = lock_unpoison(&self.repaint_signal);
         *sig = Some(Arc::new(callback));
     }
 
@@ -426,7 +548,7 @@ impl IoWorker {
     pub fn pause(&self) {
         self.is_paused.store(true, Ordering::SeqCst);
         let snapshot = {
-            let q = self.state.lock().unwrap();
+            let q = lock_unpoison(&self.state);
             q.snapshot(true)
         };
         let _ = self.event_tx.send(WorkerEvent::QueueUpdated(snapshot));
@@ -436,7 +558,7 @@ impl IoWorker {
     pub fn resume(&self) {
         self.is_paused.store(false, Ordering::SeqCst);
         let snapshot = {
-            let q = self.state.lock().unwrap();
+            let q = lock_unpoison(&self.state);
             q.snapshot(false)
         };
         let _ = self.event_tx.send(WorkerEvent::QueueUpdated(snapshot));
@@ -447,7 +569,7 @@ impl IoWorker {
         let old = self.is_paused.fetch_xor(true, Ordering::SeqCst);
         let new_val = !old;
         let snapshot = {
-            let q = self.state.lock().unwrap();
+            let q = lock_unpoison(&self.state);
             q.snapshot(new_val)
         };
         let _ = self.event_tx.send(WorkerEvent::QueueUpdated(snapshot));
@@ -466,7 +588,7 @@ impl IoWorker {
         self.cancel_all_flag.store(true, Ordering::SeqCst);
         self.is_paused.store(false, Ordering::SeqCst);
         let snapshot = {
-            let mut q = self.state.lock().unwrap();
+            let mut q = lock_unpoison(&self.state);
             q.pending_queue.clear();
             q.active_task = None;
             q.total_tasks_counter = 0;
@@ -492,7 +614,42 @@ impl Default for IoWorker {
     }
 }
 
-fn describe_command(cmd: &WorkerCommand) -> (String, String) {
+fn msg_cancelled(lang: Language) -> &'static str {
+    match lang {
+        Language::Pl => "Operacje anulowane przez użytkownika",
+        Language::En => "Operations cancelled by user",
+    }
+}
+
+fn msg_queue_finished(lang: Language) -> &'static str {
+    match lang {
+        Language::Pl => "Wszystkie zadania w kolejce zostały zakończone",
+        Language::En => "All queued tasks completed",
+    }
+}
+
+fn msg_skipped_task(lang: Language, title: &str) -> String {
+    match lang {
+        Language::Pl => format!("Pominięto zadanie: {}", title),
+        Language::En => format!("Skipped task: {}", title),
+    }
+}
+
+fn initial_command_items(cmd: &WorkerCommand) -> usize {
+    match cmd {
+        WorkerCommand::Copy { sources, .. }
+        | WorkerCommand::Move { sources, .. }
+        | WorkerCommand::CreateZip { sources, .. } => sources.len().max(1),
+        WorkerCommand::Delete { targets, .. } => targets.len().max(1),
+        WorkerCommand::BatchRename { pairs } => pairs.len().max(1),
+        WorkerCommand::CreateDir { .. }
+        | WorkerCommand::ExtractZip { .. }
+        | WorkerCommand::Rename { .. } => 1,
+    }
+}
+
+fn describe_command(cmd: &WorkerCommand, lang: Language) -> (String, String) {
+    let is_pl = lang == Language::Pl;
     match cmd {
         WorkerCommand::Copy {
             sources,
@@ -502,12 +659,22 @@ fn describe_command(cmd: &WorkerCommand) -> (String, String) {
                 let name = sources[0]
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "plik".to_string());
-                format!("Kopiowanie '{}'", name)
-            } else {
+                    .unwrap_or_else(|| if is_pl { "plik" } else { "file" }.to_string());
+                if is_pl {
+                    format!("Kopiowanie '{}'", name)
+                } else {
+                    format!("Copying '{}'", name)
+                }
+            } else if is_pl {
                 format!("Kopiowanie {} elementów", sources.len())
+            } else {
+                format!("Copying {} items", sources.len())
             };
-            let detail = format!("do {}", target_dir.display());
+            let detail = if is_pl {
+                format!("do {}", target_dir.display())
+            } else {
+                format!("to {}", target_dir.display())
+            };
             (title, detail)
         }
         WorkerCommand::Move {
@@ -518,24 +685,42 @@ fn describe_command(cmd: &WorkerCommand) -> (String, String) {
                 let name = sources[0]
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "plik".to_string());
-                format!("Przenoszenie '{}'", name)
-            } else {
+                    .unwrap_or_else(|| if is_pl { "plik" } else { "file" }.to_string());
+                if is_pl {
+                    format!("Przenoszenie '{}'", name)
+                } else {
+                    format!("Moving '{}'", name)
+                }
+            } else if is_pl {
                 format!("Przenoszenie {} elementów", sources.len())
+            } else {
+                format!("Moving {} items", sources.len())
             };
-            let detail = format!("do {}", target_dir.display());
+            let detail = if is_pl {
+                format!("do {}", target_dir.display())
+            } else {
+                format!("to {}", target_dir.display())
+            };
             (title, detail)
         }
         WorkerCommand::Delete { targets, use_trash } => {
             let title = if *use_trash {
-                format!("Kosz: {} el.", targets.len())
-            } else {
+                if is_pl {
+                    format!("Kosz: {} el.", targets.len())
+                } else {
+                    format!("Recycle Bin: {} item(s)", targets.len())
+                }
+            } else if is_pl {
                 format!("Usuwanie: {} el.", targets.len())
+            } else {
+                format!("Deleting: {} item(s)", targets.len())
             };
             let detail = if targets.len() == 1 {
                 targets[0].to_string_lossy().to_string()
-            } else {
+            } else if is_pl {
                 format!("{} wybranych ścieżek", targets.len())
+            } else {
+                format!("{} selected paths", targets.len())
             };
             (title, detail)
         }
@@ -543,8 +728,13 @@ fn describe_command(cmd: &WorkerCommand) -> (String, String) {
             let name = path
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "katalog".to_string());
-            (format!("Tworzenie katalogu '{}'", name), path.display().to_string())
+                .unwrap_or_else(|| if is_pl { "katalog" } else { "folder" }.to_string());
+            let title = if is_pl {
+                format!("Tworzenie katalogu '{}'", name)
+            } else {
+                format!("Creating folder '{}'", name)
+            };
+            (title, path.display().to_string())
         }
         WorkerCommand::ExtractZip {
             archive_path,
@@ -554,15 +744,48 @@ fn describe_command(cmd: &WorkerCommand) -> (String, String) {
             let name = archive_path
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "archiwum.zip".to_string());
-            (format!("Rozpakowywanie '{}'", name), format!("do {}", target_dir.display()))
+                .unwrap_or_else(|| "archive.zip".to_string());
+            let title = if is_pl {
+                format!("Rozpakowywanie '{}'", name)
+            } else {
+                format!("Extracting '{}'", name)
+            };
+            let detail = if is_pl {
+                format!("do {}", target_dir.display())
+            } else {
+                format!("to {}", target_dir.display())
+            };
+            (title, detail)
         }
         WorkerCommand::Rename { source, new_name } => {
             let old_name = source
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "plik".to_string());
-            (format!("Zmiana nazwy '{}'", old_name), format!("na '{}'", new_name))
+                .unwrap_or_else(|| if is_pl { "plik" } else { "file" }.to_string());
+            let title = if is_pl {
+                format!("Zmiana nazwy '{}'", old_name)
+            } else {
+                format!("Renaming '{}'", old_name)
+            };
+            let detail = if is_pl {
+                format!("na '{}'", new_name)
+            } else {
+                format!("to '{}'", new_name)
+            };
+            (title, detail)
+        }
+        WorkerCommand::BatchRename { pairs } => {
+            let title = if is_pl {
+                format!("Wielokrotna zmiana nazw ({} el.)", pairs.len())
+            } else {
+                format!("Multi-rename ({} items)", pairs.len())
+            };
+            let detail = if is_pl {
+                format!("{} plików/katalogów", pairs.len())
+            } else {
+                format!("{} files/folders", pairs.len())
+            };
+            (title, detail)
         }
         WorkerCommand::CreateZip {
             sources,
@@ -571,21 +794,36 @@ fn describe_command(cmd: &WorkerCommand) -> (String, String) {
             let name = archive_path
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "archiwum.zip".to_string());
+                .unwrap_or_else(|| "archive.zip".to_string());
             let title = if sources.len() == 1 {
-                format!("Pakowanie '{}' do ZIP", name)
-            } else {
+                if is_pl {
+                    format!("Pakowanie '{}' do ZIP", name)
+                } else {
+                    format!("Packing '{}' to ZIP", name)
+                }
+            } else if is_pl {
                 format!("Pakowanie {} elementów do ZIP", sources.len())
+            } else {
+                format!("Packing {} items to ZIP", sources.len())
             };
-            (title, format!("do {}", archive_path.display()))
+            let detail = if is_pl {
+                format!("do {}", archive_path.display())
+            } else {
+                format!("to {}", archive_path.display())
+            };
+            (title, detail)
         }
     }
 }
 
-fn calculate_command_totals(cmd: &WorkerCommand) -> (usize, u64) {
+fn calculate_command_totals_cancellable(
+    cmd: &WorkerCommand,
+    skip_current: &Arc<AtomicBool>,
+    cancel_all: &Arc<AtomicBool>,
+) -> (usize, u64) {
     match cmd {
         WorkerCommand::Copy { sources, .. } | WorkerCommand::Move { sources, .. } => {
-            calculate_sources_totals(sources)
+            calculate_sources_totals(sources, skip_current, cancel_all)
         }
         WorkerCommand::Delete { targets, .. } => (targets.len(), 0),
         WorkerCommand::CreateDir { .. } => (1, 0),
@@ -594,20 +832,49 @@ fn calculate_command_totals(cmd: &WorkerCommand) -> (usize, u64) {
             (1, size)
         }
         WorkerCommand::Rename { .. } => (1, 0),
-        WorkerCommand::CreateZip { sources, .. } => calculate_sources_totals(sources),
+        WorkerCommand::BatchRename { pairs } => (pairs.len(), 0),
+        WorkerCommand::CreateZip { sources, .. } => {
+            calculate_sources_totals(sources, skip_current, cancel_all)
+        }
     }
 }
 
-fn calculate_sources_totals(sources: &[PathBuf]) -> (usize, u64) {
+fn calculate_sources_totals(
+    sources: &[PathBuf],
+    skip_current: &Arc<AtomicBool>,
+    cancel_all: &Arc<AtomicBool>,
+) -> (usize, u64) {
     let mut total_files = 0;
     let mut total_bytes = 0;
 
     for src in sources {
-        if src.is_file() {
+        if skip_current.load(Ordering::Relaxed) || cancel_all.load(Ordering::Relaxed) {
+            break;
+        }
+        let Ok(sym_meta) = fs::symlink_metadata(src) else {
+            continue;
+        };
+        if crate::fs_item::is_symlink_or_reparse(&sym_meta) {
+            if !src.is_dir() {
+                total_files += 1;
+                if let Ok(m) = src.metadata() {
+                    total_bytes += m.len();
+                }
+            }
+            continue;
+        }
+        if sym_meta.is_file() {
             total_files += 1;
-            total_bytes += src.metadata().map(|m| m.len()).unwrap_or(0);
-        } else if src.is_dir() {
-            for entry in walkdir::WalkDir::new(src).into_iter().flatten() {
+            total_bytes += sym_meta.len();
+        } else if sym_meta.is_dir() {
+            for entry in walkdir::WalkDir::new(src)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+            {
+                if skip_current.load(Ordering::Relaxed) || cancel_all.load(Ordering::Relaxed) {
+                    break;
+                }
                 if entry.file_type().is_file() {
                     total_files += 1;
                     total_bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -639,7 +906,7 @@ impl QueueProgressTracker {
         state: Arc<Mutex<WorkerQueueState>>,
     ) -> Self {
         let (queue_bytes_base, _) = {
-            let q = state.lock().unwrap();
+            let q = lock_unpoison(&state);
             (q.queue_bytes_done_base, q.queue_total_bytes)
         };
         let now = Instant::now();
@@ -667,7 +934,7 @@ impl QueueProgressTracker {
         let elapsed_since_last = now.duration_since(self.last_event_time).as_secs_f32();
 
         let (queue_bytes_base, queue_total_bytes, queue_items_base, queue_total_items) = {
-            let q = self.state.lock().unwrap();
+            let q = lock_unpoison(&self.state);
             (
                 q.queue_bytes_done_base,
                 q.queue_total_bytes,
@@ -728,6 +995,8 @@ pub struct WorkerRuntimeContext<'a> {
     pub cancel_all: &'a Arc<AtomicBool>,
     pub wake_condvar: &'a Arc<Condvar>,
     pub state: &'a Arc<Mutex<WorkerQueueState>>,
+    pub repaint_signal: &'a RepaintSignal,
+    pub lang: Language,
 }
 
 pub fn normalize_path(p: &Path) -> PathBuf {
@@ -754,24 +1023,32 @@ pub fn is_same_file_or_dir(p1: &Path, p2: &Path) -> bool {
 }
 
 pub fn generate_non_colliding_copy_name(dst: &Path) -> PathBuf {
+    generate_non_colliding_copy_name_for_lang(dst, Language::Pl)
+}
+
+pub fn generate_non_colliding_copy_name_for_lang(dst: &Path, lang: Language) -> PathBuf {
     if !dst.exists() {
         return dst.to_path_buf();
     }
     let parent = dst.parent().unwrap_or_else(|| Path::new(""));
     let stem = dst.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let ext = dst.extension().map(|e| e.to_string_lossy().to_string());
+    let copy_word = match lang {
+        Language::Pl => "Kopia",
+        Language::En => "Copy",
+    };
 
     let mut counter = 1;
     loop {
         let new_file_name = if counter == 1 {
             match &ext {
-                Some(e) if !e.is_empty() => format!("{} - Kopia.{}", stem, e),
-                _ => format!("{} - Kopia", stem),
+                Some(e) if !e.is_empty() => format!("{} - {}.{}", stem, copy_word, e),
+                _ => format!("{} - {}", stem, copy_word),
             }
         } else {
             match &ext {
-                Some(e) if !e.is_empty() => format!("{} - Kopia ({}).{}", stem, counter, e),
-                _ => format!("{} - Kopia ({})", stem, counter),
+                Some(e) if !e.is_empty() => format!("{} - {} ({}).{}", stem, copy_word, counter, e),
+                _ => format!("{} - {} ({})", stem, copy_word, counter),
             }
         };
         let candidate = parent.join(new_file_name);
@@ -790,7 +1067,7 @@ fn check_pause_and_cancellation(ctx: &WorkerRuntimeContext) -> Result<(), &'stat
         return Err("SKIP");
     }
     if ctx.is_paused.load(Ordering::Relaxed) {
-        let mut q = ctx.state.lock().unwrap();
+        let mut q = lock_unpoison(ctx.state);
         while ctx.is_paused.load(Ordering::Relaxed) {
             if ctx.cancel_all.load(Ordering::Relaxed) {
                 return Err("CANCEL");
@@ -798,10 +1075,150 @@ fn check_pause_and_cancellation(ctx: &WorkerRuntimeContext) -> Result<(), &'stat
             if ctx.skip_current.load(Ordering::Relaxed) {
                 return Err("SKIP");
             }
-            q = ctx.wake_condvar.wait_timeout(q, Duration::from_millis(200)).unwrap().0;
+            q = ctx
+                .wake_condvar
+                .wait_timeout(q, Duration::from_millis(200))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConflictPolicy {
+    Ask,
+    OverwriteAll,
+    OverwriteOlder,
+    SkipAll,
+}
+
+enum ConflictOutcome {
+    WriteTo(PathBuf),
+    Skip,
+}
+
+fn build_conflict_info(path: &Path) -> ConflictFileInfo {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    let meta = fs::metadata(path).ok();
+    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let modified = meta.and_then(|m| m.modified().ok());
+    ConflictFileInfo {
+        path: path.to_path_buf(),
+        name,
+        size,
+        modified,
+    }
+}
+
+fn is_source_newer(src: &Path, dst: &Path) -> bool {
+    let src_m = fs::metadata(src).ok().and_then(|m| m.modified().ok());
+    let dst_m = fs::metadata(dst).ok().and_then(|m| m.modified().ok());
+    match (src_m, dst_m) {
+        (Some(s), Some(d)) => s > d,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+fn resolve_file_conflict(
+    task_id: u64,
+    src: &Path,
+    dst: &Path,
+    policy: &mut ConflictPolicy,
+    event_tx: &Sender<WorkerEvent>,
+    ctx: &WorkerRuntimeContext,
+) -> Result<ConflictOutcome, String> {
+    let mut current_dst = dst.to_path_buf();
+
+    while current_dst.exists() {
+        check_pause_and_cancellation(ctx).map_err(|e| e.to_string())?;
+        if is_same_file_or_dir(src, &current_dst) {
+            return Ok(ConflictOutcome::Skip);
+        }
+
+        match *policy {
+            ConflictPolicy::OverwriteAll => return Ok(ConflictOutcome::WriteTo(current_dst)),
+            ConflictPolicy::SkipAll => return Ok(ConflictOutcome::Skip),
+            ConflictPolicy::OverwriteOlder => {
+                if is_source_newer(src, &current_dst) {
+                    return Ok(ConflictOutcome::WriteTo(current_dst));
+                } else {
+                    return Ok(ConflictOutcome::Skip);
+                }
+            }
+            ConflictPolicy::Ask => {
+                let (reply_tx, reply_rx) = crossbeam_channel::bounded::<ConflictResolution>(1);
+                let _ = event_tx.send(WorkerEvent::ConflictDetected {
+                    task_id,
+                    source: build_conflict_info(src),
+                    destination: build_conflict_info(&current_dst),
+                    reply_tx,
+                });
+                if let Ok(guard) = ctx.repaint_signal.lock() {
+                    if let Some(ref cb) = *guard {
+                        cb();
+                    }
+                }
+
+                let resolution = loop {
+                    if ctx.cancel_all.load(Ordering::Relaxed) {
+                        return Err("CANCEL".to_string());
+                    }
+                    if ctx.skip_current.load(Ordering::Relaxed) {
+                        return Err("SKIP".to_string());
+                    }
+                    match reply_rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(res) => break res,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                            return Err("CANCEL".to_string());
+                        }
+                    }
+                };
+
+                match resolution {
+                    ConflictResolution::Overwrite => {
+                        return Ok(ConflictOutcome::WriteTo(current_dst));
+                    }
+                    ConflictResolution::OverwriteAll => {
+                        *policy = ConflictPolicy::OverwriteAll;
+                        return Ok(ConflictOutcome::WriteTo(current_dst));
+                    }
+                    ConflictResolution::OverwriteOlder => {
+                        *policy = ConflictPolicy::OverwriteOlder;
+                        if is_source_newer(src, &current_dst) {
+                            return Ok(ConflictOutcome::WriteTo(current_dst));
+                        } else {
+                            return Ok(ConflictOutcome::Skip);
+                        }
+                    }
+                    ConflictResolution::Skip => return Ok(ConflictOutcome::Skip),
+                    ConflictResolution::SkipAll => {
+                        *policy = ConflictPolicy::SkipAll;
+                        return Ok(ConflictOutcome::Skip);
+                    }
+                    ConflictResolution::Rename(new_name) => {
+                        let clean = Path::new(new_name.trim())
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if clean.is_empty() || clean == "." || clean == ".." {
+                            continue;
+                        }
+                        let parent = current_dst.parent().unwrap_or_else(|| Path::new(""));
+                        current_dst = parent.join(clean);
+                    }
+                    ConflictResolution::Cancel => return Err("CANCEL".to_string()),
+                }
+            }
+        }
+    }
+
+    Ok(ConflictOutcome::WriteTo(current_dst))
 }
 
 fn execute_task(
@@ -810,18 +1227,22 @@ fn execute_task(
     event_tx: &Sender<WorkerEvent>,
     ctx: &WorkerRuntimeContext,
 ) -> Result<String, String> {
+    let is_pl = ctx.lang == Language::Pl;
+    let mut conflict_policy = ConflictPolicy::Ask;
+
     match &task.command {
         WorkerCommand::Copy {
             sources,
             target_dir,
         } => {
+            let mut had_skipped = false;
             for src in sources {
                 check_pause_and_cancellation(ctx)
                     .map_err(|e| e.to_string())?;
                 let file_name = src
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "plik".to_string());
+                    .unwrap_or_else(|| if is_pl { "plik" } else { "file" }.to_string());
                 let mut dest = target_dir.join(&file_name);
 
                 // Zabezpieczenie przed kopiowaniem katalogu do jego własnego podkatalogu
@@ -829,32 +1250,50 @@ fn execute_task(
                     let src_norm = normalize_path(src);
                     let target_norm = normalize_path(target_dir);
                     if target_norm.starts_with(&src_norm) {
-                        return Err(format!(
-                            "Nie można skopiować folderu '{}' do jego własnego podkatalogu",
-                            file_name
-                        ));
+                        return Err(if is_pl {
+                            format!(
+                                "Nie można skopiować folderu '{}' do jego własnego podkatalogu",
+                                file_name
+                            )
+                        } else {
+                            format!(
+                                "Cannot copy folder '{}' into its own subfolder",
+                                file_name
+                            )
+                        });
                     }
                 }
 
                 // Zabezpieczenie przed samonadpisaniem (src == dest)
                 if is_same_file_or_dir(src, &dest) {
-                    dest = generate_non_colliding_copy_name(&dest);
+                    dest = generate_non_colliding_copy_name_for_lang(&dest, ctx.lang);
                 }
 
                 if let Err(e) = copy_recursive(
+                    task.id,
                     src,
                     &dest,
                     tracker,
                     event_tx,
                     ctx,
+                    &mut conflict_policy,
+                    &mut had_skipped,
                 ) {
                     if e == "SKIP" || e == "CANCEL" {
                         return Err(e);
                     }
-                    return Err(format!("Błąd kopiowania {}: {}", file_name, e));
+                    return Err(if is_pl {
+                        format!("Błąd kopiowania {}: {}", file_name, e)
+                    } else {
+                        format!("Error copying {}: {}", file_name, e)
+                    });
                 }
             }
-            Ok(format!("Skopiowano pomyślnie {} elementów", tracker.task_items_done))
+            Ok(if is_pl {
+                format!("Skopiowano pomyślnie {} elementów", tracker.task_items_done)
+            } else {
+                format!("Successfully copied {} item(s)", tracker.task_items_done)
+            })
         }
 
         WorkerCommand::Move {
@@ -867,7 +1306,7 @@ fn execute_task(
                 let file_name = src
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "plik".to_string());
+                    .unwrap_or_else(|| if is_pl { "plik" } else { "file" }.to_string());
                 let dest = target_dir.join(&file_name);
 
                 // Zabezpieczenie przed przenoszeniem na ten sam plik (no-op)
@@ -881,32 +1320,79 @@ fn execute_task(
                     let src_norm = normalize_path(src);
                     let target_norm = normalize_path(target_dir);
                     if target_norm.starts_with(&src_norm) {
-                        return Err(format!(
-                            "Nie można przenieść folderu '{}' do jego własnego podkatalogu",
-                            file_name
-                        ));
+                        return Err(if is_pl {
+                            format!(
+                                "Nie można przenieść folderu '{}' do jego własnego podkatalogu",
+                                file_name
+                            )
+                        } else {
+                            format!(
+                                "Cannot move folder '{}' into its own subfolder",
+                                file_name
+                            )
+                        });
                     }
                 }
 
-                if fs::rename(src, &dest).is_ok() {
-                    let size = dest.metadata().map(|m| m.len()).unwrap_or(0);
+                let mut had_skipped = false;
+                let resolved_dest = if !src.is_dir() && dest.exists() {
+                    match resolve_file_conflict(
+                        task.id,
+                        src,
+                        &dest,
+                        &mut conflict_policy,
+                        event_tx,
+                        ctx,
+                    )? {
+                        ConflictOutcome::WriteTo(p) => p,
+                        ConflictOutcome::Skip => {
+                            let size = src.metadata().map(|m| m.len()).unwrap_or(0);
+                            tracker.task_items_done += 1;
+                            tracker.task_bytes_done += size;
+                            continue;
+                        }
+                    }
+                } else {
+                    dest
+                };
+
+                if !resolved_dest.exists() && fs::rename(src, &resolved_dest).is_ok() {
+                    let size = resolved_dest.metadata().map(|m| m.len()).unwrap_or(0);
                     tracker.task_items_done += 1;
                     tracker.task_bytes_done += size;
                     tracker.update(&file_name, size, size, event_tx);
                     continue;
                 }
 
-                if let Err(e) = copy_recursive(
-                    src,
-                    &dest,
-                    tracker,
-                    event_tx,
-                    ctx,
-                ) {
+                if src.is_dir() {
+                    if let Err(e) = copy_recursive(
+                        task.id,
+                        src,
+                        &resolved_dest,
+                        tracker,
+                        event_tx,
+                        ctx,
+                        &mut conflict_policy,
+                        &mut had_skipped,
+                    ) {
+                        if e == "SKIP" || e == "CANCEL" {
+                            return Err(e);
+                        }
+                        return Err(if is_pl {
+                            format!("Błąd przenoszenia {}: {}", file_name, e)
+                        } else {
+                            format!("Error moving {}: {}", file_name, e)
+                        });
+                    }
+                } else if let Err(e) = copy_single_file(src, &resolved_dest, tracker, event_tx, ctx) {
                     if e == "SKIP" || e == "CANCEL" {
                         return Err(e);
                     }
-                    return Err(format!("Błąd przenoszenia {}: {}", file_name, e));
+                    return Err(if is_pl {
+                        format!("Błąd przenoszenia {}: {}", file_name, e)
+                    } else {
+                        format!("Error moving {}: {}", file_name, e)
+                    });
                 }
 
                 if ctx.skip_current.load(Ordering::Relaxed) {
@@ -916,13 +1402,31 @@ fn execute_task(
                     return Err("CANCEL".to_string());
                 }
 
-                if src.is_dir() {
-                    let _ = fs::remove_dir_all(src);
-                } else {
-                    let _ = fs::remove_file(src);
+                if !had_skipped {
+                    if src.is_dir() {
+                        fs::remove_dir_all(src).map_err(|e| {
+                            if is_pl {
+                                format!("Błąd usuwania źródła {}: {}", file_name, e)
+                            } else {
+                                format!("Error removing source {}: {}", file_name, e)
+                            }
+                        })?;
+                    } else {
+                        fs::remove_file(src).map_err(|e| {
+                            if is_pl {
+                                format!("Błąd usuwania źródła {}: {}", file_name, e)
+                            } else {
+                                format!("Error removing source {}: {}", file_name, e)
+                            }
+                        })?;
+                    }
                 }
             }
-            Ok(format!("Przeniesiono pomyślnie {} elementów", tracker.task_items_done))
+            Ok(if is_pl {
+                format!("Przeniesiono pomyślnie {} elementów", tracker.task_items_done)
+            } else {
+                format!("Successfully moved {} item(s)", tracker.task_items_done)
+            })
         }
 
         WorkerCommand::Delete { targets, use_trash } => {
@@ -932,47 +1436,78 @@ fn execute_task(
                 let file_name = target
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "element".to_string());
+                    .unwrap_or_else(|| if is_pl { "element" } else { "item" }.to_string());
 
                 tracker.update(&file_name, 0, 0, event_tx);
 
                 let res = if *use_trash {
                     trash::delete(target).map_err(|e| e.to_string())
-                } else if target.is_dir() {
-                    fs::remove_dir_all(target).map_err(|e| e.to_string())
                 } else {
-                    fs::remove_file(target).map_err(|e| e.to_string())
+                    let sym_is_dir = fs::symlink_metadata(target)
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false);
+                    if sym_is_dir {
+                        fs::remove_dir_all(target).map_err(|e| e.to_string())
+                    } else {
+                        fs::remove_file(target).map_err(|e| e.to_string())
+                    }
                 };
 
                 if let Err(e) = res {
-                    return Err(format!("Błąd usuwania {}: {}", file_name, e));
+                    return Err(if is_pl {
+                        format!("Błąd usuwania {}: {}", file_name, e)
+                    } else {
+                        format!("Error deleting {}: {}", file_name, e)
+                    });
                 }
 
                 tracker.task_items_done += 1;
             }
-            Ok(format!("Usunięto pomyślnie {} elementów", tracker.task_items_done))
+            Ok(if is_pl {
+                format!("Usunięto pomyślnie {} elementów", tracker.task_items_done)
+            } else {
+                format!("Successfully deleted {} item(s)", tracker.task_items_done)
+            })
         }
 
         WorkerCommand::CreateDir { path } => {
-            fs::create_dir_all(path).map_err(|e| format!("Błąd tworzenia katalogu: {}", e))?;
+            fs::create_dir_all(path).map_err(|e| {
+                if is_pl {
+                    format!("Błąd tworzenia katalogu: {}", e)
+                } else {
+                    format!("Error creating folder: {}", e)
+                }
+            })?;
             tracker.task_items_done += 1;
-            Ok("Katalog został utworzony".to_string())
+            Ok(if is_pl {
+                "Katalog został utworzony".to_string()
+            } else {
+                "Folder created".to_string()
+            })
         }
 
         WorkerCommand::ExtractZip {
             archive_path,
             target_dir,
             filter_prefix,
+            selected_entries,
         } => {
             let cancel_arc = Arc::new(AtomicBool::new(false));
             let cancel_check = Arc::clone(&cancel_arc);
             let skip_ref = Arc::clone(ctx.skip_current);
             let cancel_ref = Arc::clone(ctx.cancel_all);
 
-            let res = crate::zip_support::extract_zip(
+            let selected_opt = if selected_entries.is_empty() {
+                None
+            } else {
+                Some(selected_entries.as_slice())
+            };
+
+            let res = crate::archive::extract_archive_entries(
                 archive_path,
                 target_dir,
                 filter_prefix.as_deref(),
+                selected_opt,
                 &cancel_arc,
                 |rel_name, written, total| {
                     if skip_ref.load(Ordering::Relaxed) || cancel_ref.load(Ordering::Relaxed) {
@@ -992,7 +1527,11 @@ fn execute_task(
             match res {
                 Ok(count) => {
                     tracker.task_items_done += count;
-                    Ok(format!("Rozpakowano pomyślnie {} plików", count))
+                    Ok(if is_pl {
+                        format!("Rozpakowano pomyślnie {} plików", count)
+                    } else {
+                        format!("Successfully extracted {} file(s)", count)
+                    })
                 }
                 Err(e) => Err(e),
             }
@@ -1003,16 +1542,44 @@ fn execute_task(
             let dest = parent.join(new_name);
 
             if is_same_file_or_dir(source, &dest) {
-                return Ok("Nazwa pliku nie uległa zmianie".to_string());
+                return Ok(if is_pl {
+                    "Nazwa pliku nie uległa zmianie".to_string()
+                } else {
+                    "File name unchanged".to_string()
+                });
             }
 
             if dest.exists() {
-                return Err(format!("Plik o nazwie '{}' już istnieje!", new_name));
+                return Err(if is_pl {
+                    format!("Plik o nazwie '{}' już istnieje!", new_name)
+                } else {
+                    format!("A file named '{}' already exists!", new_name)
+                });
             }
 
-            fs::rename(source, &dest).map_err(|e| format!("Błąd zmiany nazwy: {}", e))?;
+            fs::rename(source, &dest).map_err(|e| {
+                if is_pl {
+                    format!("Błąd zmiany nazwy: {}", e)
+                } else {
+                    format!("Error renaming: {}", e)
+                }
+            })?;
             tracker.task_items_done += 1;
-            Ok(format!("Zmieniono nazwę na '{}'", new_name))
+            Ok(if is_pl {
+                format!("Zmieniono nazwę na '{}'", new_name)
+            } else {
+                format!("Renamed to '{}'", new_name)
+            })
+        }
+
+        WorkerCommand::BatchRename { pairs } => {
+            let executed = crate::multi_rename::execute_batch_rename(pairs)?;
+            tracker.task_items_done += executed.len();
+            Ok(if is_pl {
+                format!("Zmieniono nazwy {} elementów", executed.len())
+            } else {
+                format!("Renamed {} item(s)", executed.len())
+            })
         }
 
         WorkerCommand::CreateZip {
@@ -1048,7 +1615,11 @@ fn execute_task(
             match res {
                 Ok(count) => {
                     tracker.task_items_done += count;
-                    Ok(format!("Spakowano pomyślnie {} plików do ZIP", count))
+                    Ok(if is_pl {
+                        format!("Spakowano pomyślnie {} plików do ZIP", count)
+                    } else {
+                        format!("Successfully packed {} file(s) into ZIP", count)
+                    })
                 }
                 Err(e) => {
                     let _ = fs::remove_file(archive_path);
@@ -1059,14 +1630,24 @@ fn execute_task(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn copy_recursive(
+    task_id: u64,
     src: &Path,
     dst: &Path,
     tracker: &mut QueueProgressTracker,
     event_tx: &Sender<WorkerEvent>,
     ctx: &WorkerRuntimeContext,
+    conflict_policy: &mut ConflictPolicy,
+    had_skipped: &mut bool,
 ) -> Result<(), String> {
     check_pause_and_cancellation(ctx).map_err(|e| e.to_string())?;
+
+    let sym_meta = fs::symlink_metadata(src)
+        .map_err(|e| format!("Błąd odczytu metadanych {}: {}", src.display(), e))?;
+    if crate::fs_item::is_symlink_or_reparse(&sym_meta) && src.is_dir() {
+        return Ok(());
+    }
 
     if src.is_dir() {
         fs::create_dir_all(dst)
@@ -1086,11 +1667,14 @@ fn copy_recursive(
                 }
             }
             copy_recursive(
+                task_id,
                 &child_src,
                 &child_dst,
                 tracker,
                 event_tx,
                 ctx,
+                conflict_policy,
+                had_skipped,
             )?;
         }
     } else {
@@ -1098,51 +1682,94 @@ fn copy_recursive(
             return Ok(());
         }
 
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Błąd tworzenia katalogu: {}", e))?;
-        }
-
-        let file_name = src
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "plik".to_string());
-
-        let mut reader = fs::File::open(src)
-            .map_err(|e| format!("Błąd otwarcia pliku {}: {}", src.display(), e))?;
-        let mut writer = fs::File::create(dst)
-            .map_err(|e| format!("Błąd zapisu do pliku {}: {}", dst.display(), e))?;
-        let file_size = reader.metadata().map(|m| m.len()).unwrap_or(0);
-
-        let mut buffer = vec![0u8; 1024 * 1024]; // 1MB buffer
-        let mut file_copied = 0u64;
-
-        loop {
-            if let Err(reason) = check_pause_and_cancellation(ctx) {
-                drop(writer);
-                let _ = fs::remove_file(dst);
-                return Err(reason.to_string());
+        let final_dst = if dst.exists() {
+            match resolve_file_conflict(task_id, src, dst, conflict_policy, event_tx, ctx)? {
+                ConflictOutcome::WriteTo(p) => p,
+                ConflictOutcome::Skip => {
+                    *had_skipped = true;
+                    let file_size = fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+                    tracker.task_items_done += 1;
+                    tracker.task_bytes_done += file_size;
+                    return Ok(());
+                }
             }
+        } else {
+            dst.to_path_buf()
+        };
 
-            let bytes_read = reader
-                .read(&mut buffer)
-                .map_err(|e| format!("Błąd odczytu {}: {}", src.display(), e))?;
-            if bytes_read == 0 {
-                break;
-            }
-
-            writer
-                .write_all(&buffer[..bytes_read])
-                .map_err(|e| format!("Błąd zapisu {}: {}", dst.display(), e))?;
-            file_copied += bytes_read as u64;
-            tracker.task_bytes_done += bytes_read as u64;
-
-            tracker.update(&file_name, file_copied, file_size, event_tx);
-        }
-
-        tracker.task_items_done += 1;
-        tracker.update(&file_name, file_size, file_size, event_tx);
+        copy_single_file(src, &final_dst, tracker, event_tx, ctx)?;
     }
+
+    Ok(())
+}
+
+fn copy_single_file(
+    src: &Path,
+    dst: &Path,
+    tracker: &mut QueueProgressTracker,
+    event_tx: &Sender<WorkerEvent>,
+    ctx: &WorkerRuntimeContext,
+) -> Result<(), String> {
+    if is_same_file_or_dir(src, dst) {
+        return Ok(());
+    }
+
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Błąd tworzenia katalogu: {}", e))?;
+    }
+
+    let file_name = src
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+
+    let mut reader = fs::File::open(src)
+        .map_err(|e| format!("Błąd otwarcia pliku {}: {}", src.display(), e))?;
+    let src_meta = reader.metadata().ok();
+    let file_size = src_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+
+    let mut writer = fs::File::create(dst)
+        .map_err(|e| format!("Błąd zapisu do pliku {}: {}", dst.display(), e))?;
+
+    let mut buffer = vec![0u8; 1024 * 1024]; // 1MB buffer
+    let mut file_copied = 0u64;
+
+    loop {
+        if let Err(reason) = check_pause_and_cancellation(ctx) {
+            drop(writer);
+            let _ = fs::remove_file(dst);
+            return Err(reason.to_string());
+        }
+
+        let bytes_read = reader
+            .read(&mut buffer)
+            .map_err(|e| format!("Błąd odczytu {}: {}", src.display(), e))?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        writer
+            .write_all(&buffer[..bytes_read])
+            .map_err(|e| format!("Błąd zapisu {}: {}", dst.display(), e))?;
+        file_copied += bytes_read as u64;
+        tracker.task_bytes_done += bytes_read as u64;
+
+        tracker.update(&file_name, file_copied, file_size, event_tx);
+    }
+
+    if let Some(ref meta) = src_meta {
+        if let Ok(mtime) = meta.modified() {
+            let _ = writer.set_modified(mtime);
+        }
+    }
+    drop(writer);
+    if let Some(meta) = src_meta {
+        let _ = fs::set_permissions(dst, meta.permissions());
+    }
+
+    tracker.task_items_done += 1;
+    tracker.update(&file_name, file_size, file_size, event_tx);
 
     Ok(())
 }

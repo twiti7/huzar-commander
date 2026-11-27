@@ -1,5 +1,9 @@
+pub mod code_viewer;
 pub mod context_menu;
+pub mod dialog_bookmarks;
 pub mod dialog_config;
+pub mod dialog_diff;
+pub mod dialog_multi_rename;
 pub mod dialog_queue;
 pub mod dialog_search;
 pub mod file_dialogs;
@@ -11,4 +15,5 @@ pub mod mermaid_painter;
 pub mod panels;
 pub mod state;
 pub mod structured_viewer;
+pub mod theme;
 pub mod viewer_window;

@@ -1,7 +1,8 @@
 use std::fs;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use huzar_commander::worker::{IoWorker, WorkerCommand, WorkerEvent};
+use huzar_commander::i18n::Language;
+use huzar_commander::worker::{ConflictResolution, IoWorker, WorkerCommand, WorkerEvent};
 
 #[test]
 fn test_worker_create_dir() {
@@ -557,5 +558,220 @@ fn test_worker_repaint_signal() {
 
     assert!(got_event);
     assert!(repaint_count.load(Ordering::SeqCst) > 0);
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_worker_conflict_overwrite_and_skip() {
+    let worker = IoWorker::new();
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_conflict_ow_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let src_dir = temp_dir.join("src");
+    let dst_dir = temp_dir.join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let s1 = src_dir.join("a.txt");
+    let s2 = src_dir.join("b.txt");
+    fs::write(&s1, "NEW A").unwrap();
+    fs::write(&s2, "NEW B").unwrap();
+
+    fs::write(dst_dir.join("a.txt"), "OLD A").unwrap();
+    fs::write(dst_dir.join("b.txt"), "OLD B").unwrap();
+
+    worker.enqueue(WorkerCommand::Copy {
+        sources: vec![s1, s2],
+        target_dir: dst_dir.clone(),
+    });
+
+    let mut finished = false;
+    while let Ok(ev) = worker.event_rx.recv_timeout(Duration::from_secs(5)) {
+        match ev {
+            WorkerEvent::ConflictDetected { destination, reply_tx, .. } => {
+                if destination.name == "a.txt" {
+                    reply_tx.send(ConflictResolution::Skip).unwrap();
+                } else {
+                    reply_tx.send(ConflictResolution::Overwrite).unwrap();
+                }
+            }
+            WorkerEvent::QueueFinished { .. } => {
+                finished = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(finished);
+    assert_eq!(fs::read_to_string(dst_dir.join("a.txt")).unwrap(), "OLD A");
+    assert_eq!(fs::read_to_string(dst_dir.join("b.txt")).unwrap(), "NEW B");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_worker_conflict_rename() {
+    let worker = IoWorker::new();
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_conflict_ren_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let src_dir = temp_dir.join("src");
+    let dst_dir = temp_dir.join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let src = src_dir.join("file.txt");
+    fs::write(&src, "NEW CONTENT").unwrap();
+    fs::write(dst_dir.join("file.txt"), "EXISTING CONTENT").unwrap();
+
+    worker.enqueue(WorkerCommand::Copy {
+        sources: vec![src],
+        target_dir: dst_dir.clone(),
+    });
+
+    let mut finished = false;
+    while let Ok(ev) = worker.event_rx.recv_timeout(Duration::from_secs(5)) {
+        match ev {
+            WorkerEvent::ConflictDetected { reply_tx, .. } => {
+                reply_tx
+                    .send(ConflictResolution::Rename("renamed.txt".to_string()))
+                    .unwrap();
+            }
+            WorkerEvent::QueueFinished { .. } => {
+                finished = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(finished);
+    assert_eq!(
+        fs::read_to_string(dst_dir.join("file.txt")).unwrap(),
+        "EXISTING CONTENT"
+    );
+    assert_eq!(
+        fs::read_to_string(dst_dir.join("renamed.txt")).unwrap(),
+        "NEW CONTENT"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_worker_conflict_overwrite_older() {
+    let worker = IoWorker::new();
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_conflict_older_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let src_dir = temp_dir.join("src");
+    let dst_dir = temp_dir.join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let now = std::time::SystemTime::now();
+    let older = now - Duration::from_secs(3600);
+    let newer = now - Duration::from_secs(60);
+
+    let s_newer = src_dir.join("newer.txt");
+    let s_older = src_dir.join("older.txt");
+    let d_newer = dst_dir.join("newer.txt");
+    let d_older = dst_dir.join("older.txt");
+
+    fs::write(&s_newer, "SRC NEWER").unwrap();
+    fs::File::options().write(true).open(&s_newer).unwrap().set_modified(newer).unwrap();
+    fs::write(&d_newer, "DST OLDER").unwrap();
+    fs::File::options().write(true).open(&d_newer).unwrap().set_modified(older).unwrap();
+
+    fs::write(&s_older, "SRC OLDER").unwrap();
+    fs::File::options().write(true).open(&s_older).unwrap().set_modified(older).unwrap();
+    fs::write(&d_older, "DST NEWER").unwrap();
+    fs::File::options().write(true).open(&d_older).unwrap().set_modified(newer).unwrap();
+
+    worker.enqueue(WorkerCommand::Copy {
+        sources: vec![s_newer, s_older],
+        target_dir: dst_dir.clone(),
+    });
+
+    let mut prompt_count = 0;
+    let mut finished = false;
+    while let Ok(ev) = worker.event_rx.recv_timeout(Duration::from_secs(5)) {
+        match ev {
+            WorkerEvent::ConflictDetected { reply_tx, .. } => {
+                prompt_count += 1;
+                reply_tx.send(ConflictResolution::OverwriteOlder).unwrap();
+            }
+            WorkerEvent::QueueFinished { .. } => {
+                finished = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(finished);
+    assert_eq!(prompt_count, 1, "OverwriteOlder applies to remaining conflicts in the task");
+    assert_eq!(fs::read_to_string(&d_newer).unwrap(), "SRC NEWER");
+    assert_eq!(fs::read_to_string(&d_older).unwrap(), "DST NEWER");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_worker_preserves_mtime() {
+    let worker = IoWorker::new();
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_mtime_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let dst_dir = temp_dir.join("dst");
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    let src = temp_dir.join("dated.txt");
+    fs::write(&src, "preserve my mtime").unwrap();
+    let target_time = std::time::SystemTime::now() - Duration::from_secs(86_400);
+    fs::File::options().write(true).open(&src).unwrap().set_modified(target_time).unwrap();
+    let expected_mtime = fs::metadata(&src).unwrap().modified().unwrap();
+
+    worker.enqueue(WorkerCommand::Copy {
+        sources: vec![src],
+        target_dir: dst_dir.clone(),
+    });
+
+    let mut finished = false;
+    while let Ok(ev) = worker.event_rx.recv_timeout(Duration::from_secs(5)) {
+        if let WorkerEvent::QueueFinished { .. } = ev {
+            finished = true;
+            break;
+        }
+    }
+    assert!(finished);
+
+    let copied_mtime = fs::metadata(dst_dir.join("dated.txt")).unwrap().modified().unwrap();
+    let diff = expected_mtime
+        .duration_since(copied_mtime)
+        .or_else(|e| Ok::<Duration, std::time::SystemTimeError>(e.duration()))
+        .unwrap();
+    assert!(diff < Duration::from_secs(2), "Copied file mtime should match source");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_worker_english_messages() {
+    let worker = IoWorker::new();
+    worker.set_language(Language::En);
+    let temp_dir = std::env::temp_dir().join(format!("cmdr_test_en_msg_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    worker.enqueue(WorkerCommand::CreateDir {
+        path: temp_dir.clone(),
+    });
+
+    let mut finished_msg = String::new();
+    while let Ok(ev) = worker.event_rx.recv_timeout(Duration::from_secs(5)) {
+        if let WorkerEvent::TaskFinished { message, .. } = ev {
+            finished_msg = message;
+            break;
+        }
+    }
+
+    assert_eq!(finished_msg, "Folder created");
     let _ = fs::remove_dir_all(&temp_dir);
 }

@@ -46,6 +46,9 @@ impl ZipLocation {
     }
 
     pub fn display_path(&self) -> String {
+        let tag = crate::archive::ArchiveFormat::from_path(&self.archive_path)
+            .map(|f| f.tag())
+            .unwrap_or("ZIP");
         let name = self
             .archive_path
             .file_name()
@@ -53,9 +56,9 @@ impl ZipLocation {
             .unwrap_or_else(|| "archiwum.zip".to_string());
 
         if self.internal_dir.is_empty() {
-            format!("{} [ZIP]", name)
+            format!("{} [{}]", name, tag)
         } else {
-            format!("{} [ZIP]/{}", name, self.internal_dir)
+            format!("{} [{}]/{}", name, tag, self.internal_dir)
         }
     }
 }
@@ -66,6 +69,40 @@ pub fn is_zip_file(path: &Path) -> bool {
             .extension()
             .map(|e| e.to_string_lossy().eq_ignore_ascii_case("zip"))
             .unwrap_or(false)
+}
+
+/// Validates and normalizes a relative path from a ZIP entry, rejecting traversal, absolute paths, drive prefixes, and NUL bytes.
+pub fn sanitize_zip_rel_path(raw: &str) -> Option<PathBuf> {
+    if raw.is_empty() || raw.contains('\0') {
+        return None;
+    }
+
+    let normalized = raw.replace('\\', "/");
+    if normalized.starts_with('/') {
+        return None;
+    }
+
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return None;
+    }
+
+    let mut out = PathBuf::new();
+    for comp in Path::new(&normalized).components() {
+        match comp {
+            std::path::Component::Normal(part) => out.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+
+    if out.as_os_str().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 pub fn list_zip_entries(
@@ -134,6 +171,7 @@ pub fn list_zip_entries(
                     modified: None,
                     is_hidden: false,
                     is_readonly: false,
+                    is_symlink: false,
                 });
             }
         } else if is_dir_entry {
@@ -150,6 +188,7 @@ pub fn list_zip_entries(
                     modified: None,
                     is_hidden: false,
                     is_readonly: false,
+                    is_symlink: false,
                 });
             }
         } else {
@@ -172,6 +211,7 @@ pub fn list_zip_entries(
                 modified: None,
                 is_hidden: false,
                 is_readonly: false,
+                is_symlink: false,
             });
         }
     }
@@ -297,6 +337,17 @@ pub fn extract_zip(
     target_dir: &Path,
     filter_prefix: Option<&str>,
     cancel: &Arc<AtomicBool>,
+    progress_cb: impl FnMut(&str, u64, u64),
+) -> Result<usize, String> {
+    extract_zip_entries(archive_path, target_dir, filter_prefix, None, cancel, progress_cb)
+}
+
+pub fn extract_zip_entries(
+    archive_path: &Path,
+    target_dir: &Path,
+    filter_prefix: Option<&str>,
+    selected_entries: Option<&[String]>,
+    cancel: &Arc<AtomicBool>,
     mut progress_cb: impl FnMut(&str, u64, u64),
 ) -> Result<usize, String> {
     let file = File::open(archive_path).map_err(|e| format!("Błąd otwarcia ZIP: {}", e))?;
@@ -305,6 +356,12 @@ pub fn extract_zip(
 
     let mut extracted_count = 0;
     let total_entries = archive.len();
+    let normalized_selected: Vec<String> = selected_entries
+        .unwrap_or(&[])
+        .iter()
+        .map(|s| s.replace('\\', "/").trim_start_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     fs::create_dir_all(target_dir)
         .map_err(|e| format!("Błąd tworzenia katalogu docelowego: {}", e))?;
@@ -324,8 +381,24 @@ pub fn extract_zip(
         };
         let raw_name = name_cow.replace('\\', "/");
 
+        if sanitize_zip_rel_path(&raw_name).is_none() {
+            continue;
+        }
+
         if let Some(prefix) = filter_prefix {
             if !prefix.is_empty() && !raw_name.starts_with(prefix) {
+                continue;
+            }
+        }
+
+        if !normalized_selected.is_empty() {
+            let trimmed_raw = raw_name.trim_start_matches('/');
+            let matches_selection = normalized_selected.iter().any(|sel| {
+                let sel_dir = sel.trim_end_matches('/');
+                trimmed_raw == sel.as_str()
+                    || trimmed_raw.starts_with(&format!("{}/", sel_dir))
+            });
+            if !matches_selection {
                 continue;
             }
         }
@@ -342,10 +415,10 @@ pub fn extract_zip(
         }
 
         // Prevent path traversal vulnerability (Zip Slip)
-        let out_path = target_dir.join(rel_path);
-        if !out_path.starts_with(target_dir) {
+        let Some(safe_rel) = sanitize_zip_rel_path(rel_path) else {
             continue;
-        }
+        };
+        let out_path = target_dir.join(&safe_rel);
 
         if file_entry.is_dir() || raw_name.ends_with('/') {
             let _ = fs::create_dir_all(&out_path);
@@ -438,7 +511,7 @@ pub fn create_zip_archive(
             }
             total_added += 1;
         } else if src.is_dir() {
-            let walker = walkdir::WalkDir::new(src);
+            let walker = walkdir::WalkDir::new(src).follow_links(false);
             for entry in walker.into_iter().flatten() {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Operacja pakowania anulowana".to_string());

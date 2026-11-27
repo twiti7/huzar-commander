@@ -34,44 +34,73 @@ C:\Workspace\commander\
 ├── locales/
 │   ├── pl.json              # Standardowe tłumaczenia w języku polskim (PL)
 │   └── en.json              # Standardowe tłumaczenia w języku angielskim (EN)
-├── tests/                   # Zewnętrzne testy jednostkowe i integracyjne (15 modułów testowych)
+├── tests/                   # Zewnętrzne testy jednostkowe i integracyjne (25 modułów testowych)
+│   ├── archive_tests.rs
+│   ├── checksum_tests.rs
+│   ├── cli_tests.rs
+│   ├── clipboard_tests.rs
 │   ├── config_tests.rs
+│   ├── context_menu_tests.rs
+│   ├── diff_tests.rs
 │   ├── drives_tests.rs
 │   ├── fs_item_tests.rs
 │   ├── i18n_tests.rs
+│   ├── multi_rename_tests.rs
 │   ├── opener_tests.rs
 │   ├── panel_tests.rs
 │   ├── search_tests.rs
+│   ├── tabs_tests.rs
+│   ├── theme_tests.rs
 │   ├── ui_file_dialogs_tests.rs
 │   ├── ui_markdown_tests.rs
 │   ├── ui_mermaid_tests.rs
 │   ├── ui_panels_tests.rs
 │   ├── ui_state_tests.rs
 │   ├── ui_structured_tests.rs
+│   ├── watcher_tests.rs
 │   ├── worker_tests.rs
 │   └── zip_tests.rs
 ├── src/
 │   ├── lib.rs               # Eksport modułów bibliotecznych (huzar_commander)
 │   ├── main.rs              # Punkt wejściowy, ikona okna, eframe::run_native
-│   ├── app.rs               # Centralny orchestrator (CommanderApp, App::update, skróty)
-│   ├── config.rs            # Konfiguracja edytorów i skojarzeń (AppConfig, load/save JSON)
+│   ├── app/                 # Centralny orchestrator (moduły aplikacji i koordynacja UI)
+│   │   ├── mod.rs           # CommanderApp, implementacja eframe::App, zarządzanie sesją
+│   │   ├── shortcuts.rs     # Globalne skróty klawiszowe i obsługa wejścia klawiatury
+│   │   ├── actions.rs       # Wykonanie akcji paneli, menu, CLI (cd/historia) oraz operacji I/O
+│   │   └── dialogs.rs       # Koordynacja renderingu okien modalnych i podglądu F3
+│   ├── archive.rs           # Wspólna obsługa przeglądania i ekstrakcji archiwów (.zip, .tar, .tar.gz/.tgz, .7z)
+│   ├── checksum.rs          # Strumieniowe obliczanie i weryfikacja sum kontrolnych (SHA-256, MD5, CRC32)
+│   ├── clipboard.rs         # Obsługa schowka plików (CF_HDROP na Windows, Kopiuj/Wytnij/Wklej)
+│   ├── config.rs            # Konfiguracja edytorów i skojarzeń (AppConfig, AppData/XDG + tryb portable)
+│   ├── diff.rs              # Porównywanie dwóch plików side-by-side (similar TextDiff)
 │   ├── drives.rs            # Wykrywanie napędów, Win32 API, wolne/całkowite miejsce
 │   ├── fs_item.rs           # Model pliku (FileItem), kryteria sortowania (SortColumn, SortOrder)
 │   ├── i18n.rs              # Moduł internacjonalizacji i18n: Language (Pl/En), embedded fallback + override z dysku
+│   ├── multi_rename.rs      # Silnik wielokrotnej zmiany nazw (wzorce [N][E][C], regex, 2-fazowe Cofnij)
 │   ├── opener.rs            # Uruchamianie programów skojarzonych, podgląd F3, chunking 64 KB
-│   ├── panel.rs             # Stan panelu (PanelState), nawigacja, filtrowanie, wirtualny ZIP
+│   ├── panel.rs             # Stan panelu (PanelState), nawigacja, filtrowanie, wirtualny ZIP, UNC
 │   ├── search.rs            # Asynchroniczny silnik wyszukiwania (SearchHandle, SearchParams)
+│   ├── tabs.rs              # Menedżer kart paneli (PanelTab, PanelTabManager, blokowanie kart)
+│   ├── watcher.rs           # Auto-odświeżanie katalogów z debounce oparte o crate notify
 │   ├── worker.rs            # Silnik kolejki I/O (IoWorker, WorkerCommand, TaskItem, telemetria)
-│   ├── zip_support.rs       # Odczyt, wirtualne drzewo i ekstrakcja archiwów ZIP
+│   ├── zip_support.rs       # Odczyt, wirtualne drzewo i bezpieczna ekstrakcja archiwów ZIP
 │   └── ui/                  # Warstwa prezentacji Immediate Mode (egui)
 │       ├── mod.rs           # Eksport podmodułów UI
-│       ├── state.rs         # Enkapsulowane stany modalne (FileOps, Search, Viewer, Progress)
+│       ├── state.rs         # Enkapsulowane stany modalne (FileOps, Search, Viewer, QuickView, Progress, ContextMenu)
+│       ├── code_viewer.rs   # Podgląd kodu źródłowego z kolorowaniem składni i podświetlaniem wyników szukania
+│       ├── context_menu.rs  # Kontekstowe menu PPM w stylu Eksploratora Windows
+│       ├── fonts.rs         # Rejestracja czcionek i wieloplatformowych fallbacków symboli
 │       ├── panels.rs        # Rendering kolumn paneli, tabela z wirtualnym scrollem
-│       ├── viewer_window.rs # Okno F3: strumieniowanie, Text/Hex/Markdown, suwak, paginacja, ograniczenie rozmiaru do okna
+│       ├── viewer_window.rs # Okno F3: strumieniowanie, Text/Hex/Markdown/JSON/YAML, suwak, paginacja
 │       ├── markdown_viewer.rs # Natywny, czysty silnik renderowania Markdown (bloki kodu, tabele, listy, diagramy Mermaid)
 │       ├── structured_viewer.rs # Podgląd JSON i YAML: kolorowanie składni, numeracja linii, interaktywne drzewo obiektów
+│       ├── theme.rs             # System motywów kolorystycznych (Midnight Dark, Norton Blue, Light, High Contrast) i skalowanie czcionki
 │       ├── mermaid_layout.rs # Czysty silnik parsowania i układu diagramów Mermaid (Sugiyama layout)
 │       ├── mermaid_painter.rs # Natywny renderer diagramów graficznych Mermaid w egui (flowchart, sequence, pie itp.)
+│       ├── dialog_bookmarks.rs # Okno ulubionych katalogów / Directory Hotlist (Ctrl+D)
+│       ├── dialog_config.rs # Okno dialogowe konfiguracji edytorów i skojarzeń (F4)
+│       ├── dialog_diff.rs   # Okno side-by-side porównywania plików (Ctrl+Shift+D)
+│       ├── dialog_multi_rename.rs # Okno wielokrotnej zmiany nazw z podglądem na żywo (Ctrl+M)
 │       ├── dialog_search.rs # Okno Alt+F7: maska, zawartość tekstu, tabela wyników
 │       ├── dialog_queue.rs  # Okno kolejki, modal postępu, wykres prędkości, pasek tła
 │       ├── file_dialogs.rs  # Dialogi: Mkdir (F7), Delete (F8), Copy (F5), Move (F6), Dyski, O programie (z logo husarii)
@@ -86,10 +115,13 @@ C:\Workspace\commander\
 | Moduł / Plik | Odpowiedzialność |
 |---|---|
 | [src/main.rs](file:///C:/Workspace/commander/src/main.rs) | Bootstrap aplikacji. Inicjalizacja `NativeOptions` z akceleracją Glow, maksymalizacja okna, start pętli `eframe::run_native`. |
-| [src/app.rs](file:///C:/Workspace/commander/src/app.rs) | Główny koordynator. Implementuje `eframe::App`. Odpytuje komunikaty z workerów i wątków wyszukiwania, obsługuje globalne skróty klawiszowe, zdejmuje focus z menu podczas nawigacji i deleguje rendering do `ui/`. |
-| [src/ui/state.rs](file:///C:/Workspace/commander/src/ui/state.rs) | Czyste struktury stanu GUI: `FileOpsState`, `DriveMenuState`, `ProgressUiState`, `SearchDialogState`, `ViewerWindowState`. Zawiera metody nawigacji chunków F3 (`seek_next`, `seek_prev`, `reload_chunk`). |
+| [src/app/](file:///C:/Workspace/commander/src/app/mod.rs) | Główny koordynator (`mod.rs`, `shortcuts.rs`, `actions.rs`, `dialogs.rs`). Implementuje `eframe::App`, zarządza sesją, odpytuje workerów, obsługuje skróty klawiszowe i deleguje rendering do `ui/`. |
+| [src/ui/state.rs](file:///C:/Workspace/commander/src/ui/state.rs) | Czyste struktury stanu GUI: `FileOpsState`, `DriveMenuState`, `ProgressUiState`, `SearchDialogState`, `ViewerWindowState`, `ContextMenuState`. Zawiera metody nawigacji chunków F3 (`seek_next`, `seek_prev`, `reload_chunk`). |
+| [src/ui/context_menu.rs](file:///C:/Workspace/commander/src/ui/context_menu.rs) | Kontekstowe menu pod PPM w stylu Eksploratora Windows (akcje na plikach, folderach, ZIP i tle panelu, podmenu sortowania oraz tworzenia nowych elementów). |
+| [src/ui/fonts.rs](file:///C:/Workspace/commander/src/ui/fonts.rs) | Konfiguracja czcionek `egui` oraz rejestracja wieloplatformowych fallbacków dla symboli (Windows Segoe UI Symbol / Linux DejaVu & Noto Sans Symbols). |
 | [src/ui/panels.rs](file:///C:/Workspace/commander/src/ui/panels.rs) | Układ dwukolumnowy (`render_dual_panels`), renderowanie pojedynczego panelu (`render_panel`), wirtualna tabela `TableBuilder`, podświetlenie wierszy, obsługa PPM i kliknięć. |
-| [src/ui/viewer_window.rs](file:///C:/Workspace/commander/src/ui/viewer_window.rs) | Kompletny komponent okna F3: nagłówek z przyciskiem `[X]`, Text/Hex/Markdown, wskaźnik pozycji i procentu, suwak pliku, paginacja 64 KB, ograniczenie rozmiaru do okna aplikacji (`constrain`, clamp), obsługa klawiszy `PgUp`/`PgDn`/`Home`/`End`/`Esc`. |
+| [src/ui/viewer_window.rs](file:///C:/Workspace/commander/src/ui/viewer_window.rs) | Kompletny komponent okna F3 i panelu Quick View (`Ctrl+Q`): Text/Code/Hex/Markdown/JSON/YAML/Obraz, kodowanie (`UTF-8`, `Windows-1250`, `UTF-16`), Word Wrap, Tail, szukanie asynchroniczne przód/tył, paginacja 64 KB. |
+| [src/ui/code_viewer.rs](file:///C:/Workspace/commander/src/ui/code_viewer.rs) | Tokenizator i renderer podświetlania składni kodu z numeracją linii oraz podświetlaniem wyszukiwanych fraz. |
 | [src/ui/markdown_viewer.rs](file:///C:/Workspace/commander/src/ui/markdown_viewer.rs) | Zaawansowany silnik renderowania CommonMark/Markdown: nagłówki z separatorami, bloki kodu z etykietą i przyciskiem kopiowania, listy zagnieżdżone, cytaty, tabele oraz graficzne diagramy Mermaid. |
 | [src/ui/structured_viewer.rs](file:///C:/Workspace/commander/src/ui/structured_viewer.rs) | Silnik podglądu JSON i YAML: tokenizowane kolorowanie składni z numeracją linii, walidacja błędów, przełącznik widoku oraz interaktywne drzewo obiektów z odznakami typów i kopiowaniem wartości. |
 | [src/ui/mermaid_layout.rs](file:///C:/Workspace/commander/src/ui/mermaid_layout.rs) | Czysty, bezpołączeniowy silnik parsowania i wyliczania geometrii diagramów Mermaid (Sugiyama layout, Flowchart, Sequence, Pie, Gantt, Git, Journey). |
@@ -99,13 +131,24 @@ C:\Workspace\commander\
 | [src/ui/dialog_search.rs](file:///C:/Workspace/commander/src/ui/dialog_search.rs) | Modal wyszukiwania (Alt+F7): maska, tekst, przeszukiwanie rekurencyjne, wielkość liter, tabela wyników i przyciski akcji (`Przejdź do pliku`, `Podgląd F3`). |
 | [src/ui/menu_bars.rs](file:///C:/Workspace/commander/src/ui/menu_bars.rs) | Górny pasek menu rozwijanego, dolny pasek klawiszy F1–F10 (z `surrender_focus()`), linia poleceń CLI oraz 5-sekundowy pasek komunikatów statusu. |
 | [src/panel.rs](file:///C:/Workspace/commander/src/panel.rs) | Reprezentacja stanu panelu (`PanelState`). Skanowanie katalogów, filtracja na żywo (`filter`, `apply_filter`), sortowanie stabilne z zachowaniem kursora, wirtualny tryb archiwum ZIP (`zip_location`). |
+| [src/tabs.rs](file:///C:/Workspace/commander/src/tabs.rs) | Zarządzanie wieloma kartami paneli (`PanelTabManager`, `PanelTab`, duplikacja, przełączanie, blokowanie kart). |
+| [src/watcher.rs](file:///C:/Workspace/commander/src/watcher.rs) | Nieblokujący obserwator zmian w systemie plików (`DirWatcher` / `notify`) z debounce i pominięciem UNC/ZIP. |
+| [src/multi_rename.rs](file:///C:/Workspace/commander/src/multi_rename.rs) | Silnik wielokrotnej zmiany nazw (`compute_rename_preview`, regex, detekcja kolizji, dwufazowy `execute_batch_rename`). |
+| [src/diff.rs](file:///C:/Workspace/commander/src/diff.rs) | Silnik porównywania plików tekstowych side-by-side (`compute_side_by_side_diff`, `load_and_diff_files`). |
+| [src/ui/dialog_multi_rename.rs](file:///C:/Workspace/commander/src/ui/dialog_multi_rename.rs) | Okno wielokrotnej zmiany nazw (`Ctrl+M`) z podglądem kolizji i jednorazowym Cofnij. |
+| [src/ui/dialog_diff.rs](file:///C:/Workspace/commander/src/ui/dialog_diff.rs) | Synchronizowany wirtualizowany widok side-by-side diff (`Ctrl+Shift+D`). |
+| [src/ui/dialog_bookmarks.rs](file:///C:/Workspace/commander/src/ui/dialog_bookmarks.rs) | Okno ulubionych katalogów (`Ctrl+D`) z dodawaniem, edycją, zmianą kolejności i skokiem do wybranego panelu. |
 | [src/worker.rs](file:///C:/Workspace/commander/src/worker.rs) | Silnik wielozadaniowej kolejki transferu (`IoWorker`). Wątek I/O z buforem 1 MB, obsługa `Copy`, `Move`, `Delete`, `CreateDir`, `ExtractZip`, pauza/wznowienie przez `Condvar`, natychmiastowe pomijanie zadań (`skip_current`) oraz agregacja ETA. |
 | [src/search.rs](file:///C:/Workspace/commander/src/search.rs) | Dedykowany wątek wyszukiwarki plików. Dopasowywanie masek wieloznacznych (obsługuje średniki np. `*.rs;*.toml`), przeszukiwanie strumieniowe treści plików, token anulowania `AtomicBool`. |
 | [src/opener.rs](file:///C:/Workspace/commander/src/opener.rs) | Uruchamianie programów skojarzonych dla plików (video, audio, exe itp.), wykrywanie plików multimedialnych/graficznych, niskopoziomowy odczyt chunków `read_file_chunk` i formatowanie Hex dumpera. |
 | [src/zip_support.rs](file:///C:/Workspace/commander/src/zip_support.rs) | Parsowanie archiwów ZIP, generowanie wirtualnej struktury folderów dla nawigacji oraz selektywna/całościowa dekompresja. |
+| [src/archive.rs](file:///C:/Workspace/commander/src/archive.rs) | Jednolity interfejs archiwów (`ArchiveFormat`: ZIP, TAR, TAR.GZ/TGZ, 7Z) z ochroną przed Zip-Slip. |
+| [src/checksum.rs](file:///C:/Workspace/commander/src/checksum.rs) | Jednoprzebiegowe strumieniowe wyliczanie i weryfikacja SHA-256 / MD5 / CRC32 dla okna Właściwości (Alt+Enter). |
 | [src/drives.rs](file:///C:/Workspace/commander/src/drives.rs) | Wykrywanie dysków systemowych Windows za pomocą Win32 API (`GetLogicalDrives`, `GetVolumeInformationW`, `GetDiskFreeSpaceExW`) oraz uniksowy fallback. |
-| [src/config.rs](file:///C:/Workspace/commander/src/config.rs) | Zarządzanie konfiguracją aplikacji (`AppConfig`): domyślny edytor, mapa rozszerzeń do programów, trwały zapis i odczyt z pliku `config.json`. |
-| [src/ui/dialog_config.rs](file:///C:/Workspace/commander/src/ui/dialog_config.rs) | Okno dialogowe konfiguracji edytorów i skojarzeń (dostępne z menu Opcje -> Skojarzenia edytorów). |
+| [src/config.rs](file:///C:/Workspace/commander/src/config.rs) | Zarządzanie konfiguracją aplikacji (`AppConfig`): domyślny edytor, mapa rozszerzeń, trwały zapis w `%APPDATA%`/XDG (lub trybie portable obok `.exe`). |
+| [src/clipboard.rs](file:///C:/Workspace/commander/src/clipboard.rs) | Obsługa schowka plików (`FileClipboard`, kodowanie/dekodowanie `CF_HDROP` UTF-16 oraz `Preferred DropEffect` na Windows). |
+| [src/ui/dialog_config.rs](file:///C:/Workspace/commander/src/ui/dialog_config.rs) | Zakładkowe okno Ustawień: edytory i skojarzenia (F4), wygląd i motywy, zachowanie aplikacji. |
+| [src/ui/theme.rs](file:///C:/Workspace/commander/src/ui/theme.rs) | Silnik motywów (`ThemePalette`, 4 motywy kolorystyczne) oraz konfiguracja rozmiaru czcionek w `egui`. |
 | [src/i18n.rs](file:///C:/Workspace/commander/src/i18n.rs) | Silnik internacjonalizacji (i18n): obsługa wielu języków (PL, EN), płaskie i zagnieżdżone klucze JSON, pre-kompilowany fallback `include_str!` oraz możliwość nadpisywania z katalogu `locales/` na dysku w czasie rzeczywistym. |
 | [src/fs_item.rs](file:///C:/Workspace/commander/src/fs_item.rs) | Struktura metadanych wpisu w plikach (`FileItem`), kolorowanie wg rozszerzeń, wskaźniki katalogów i formatowanie daty. |
 
@@ -152,7 +195,7 @@ sequenceDiagram
 3. Plik nie jest wczytywany w całości do pamięci RAM:
    - Funkcja `read_file_chunk(path, offset, 64 * 1024)` odczytuje dokładnie 64 KB z dysku.
    - Detekcja binarności (`detect_is_binary`) oraz rozszerzenia Markdown (`is_markdown_file`) decyduje o domyślnym trybie (`ViewerMode::Hex`, `ViewerMode::Text` lub `ViewerMode::Markdown`).
-   - W trybie `ViewerMode::Markdown` zawartość renderowana jest sformatowana przez bibliotekę `egui_commonmark` (nagłówki, tabele, kod, listy itp.) z możliwością natychmiastowego przełączenia na surowy tekst lub hex.
+   - W trybie `ViewerMode::Markdown` zawartość renderowana jest natywnie przez własny parser oparty na `pulldown-cmark` ([src/ui/markdown_viewer.rs](file:///C:/Workspace/commander/src/ui/markdown_viewer.rs)) z obsługą nagłówków, tabel, bloków kodu i diagramów Mermaid, z możliwością natychmiastowego przełączenia na surowy tekst lub hex.
    - W oknie podglądu użytkownik może przesuwać suwak (seek proporcjonalny w zakresie `0..total_size`) lub używać przycisków paginacji (`seek_next`, `seek_prev`), co powoduje przeładowanie tylko aktywnego chunka 64 KB.
 
 ### 3.3. Zarządzanie Focusem i Nawigacją Klawiatury (Focus Surrender Pattern)
@@ -204,7 +247,7 @@ if self.progress.is_open || self.search.handle.is_some() {
 Zapewnia to 60 FPS dla neonowego wykresu prędkości oraz płynną aktualizację liczników bajtów i ETA.
 
 ### Reguła 5: Zachowanie testów jednostkowych i integracyjnych
-Projekt posiada 85 testów jednostkowych i integracyjnych w katalogu `tests/` (15 plików testowych).
+Projekt posiada 143 testy jednostkowe i integracyjne w katalogu `tests/` (25 plików testowych).
 Przed zakończeniem zadania agent **musi** uruchomić `cargo test` i upewnić się, że wszystkie testy przechodzą pomyślnie.
 
 ---
@@ -270,6 +313,6 @@ Projekt jest w pełni kompatybilny z Linuksem (X11 oraz Wayland):
 ## 7. Status Projektu i Metryki Jakości
 
 - **Stan kompilacji:** 0 błędów, 0 ostrzeżeń (`cargo check` / `cargo build` clean, 0 ostrzeżeń clippy).
-- **Stan testów:** 86/86 testów jednostkowych i integracyjnych w katalogu `tests/` przechodzi pomyślnie (15 plików testowych).
+- **Stan testów:** 143/143 testów jednostkowych i integracyjnych w katalogu `tests/` przechodzi pomyślnie (25 plików testowych).
 - **Branding & Ikona:** Ikona skrzydeł husarskich (`assets/huzar_icon.png`, `assets/huzar_icon.ico`) zintegrowana w nagłówku PE Windows (`build.rs`), oknie `eframe::NativeOptions`, oknie F1 „O programie” oraz prawym rogu górnego menu.
 - **Wydajność I/O:** Prędkość kopiowania na poziomie dysku SSD (bufor 1 MB), responsywność interfejsu GUI stabilne 60 FPS, brak alokacji RAM przy podglądzie dużych plików wielogigabajtowych.

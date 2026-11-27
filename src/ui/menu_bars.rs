@@ -1,7 +1,18 @@
-use egui::{Color32, Key, RichText, Stroke};
+use egui::{Key, RichText, Stroke};
 
 use crate::app::PanelSide;
+use crate::config::ThemeKind;
 use crate::i18n::{I18n, Language};
+use crate::ui::theme::ThemePalette;
+
+pub fn theme_label_key(kind: ThemeKind) -> &'static str {
+    match kind {
+        ThemeKind::MidnightDark => "menu.theme_midnight",
+        ThemeKind::ClassicNortonBlue => "menu.theme_norton",
+        ThemeKind::Light => "menu.theme_light",
+        ThemeKind::HighContrast => "menu.theme_high_contrast",
+    }
+}
 
 pub enum MenuAction {
     TriggerF1About,
@@ -24,6 +35,13 @@ pub enum MenuAction {
     DeselectGroup,
 
     OpenSearchDialog,
+    OpenBookmarks,
+    ToggleQuickView,
+    OpenMultiRename,
+    CompareDirs,
+    CompareFiles,
+    NewTab,
+    CloseTab,
     OpenQueueDialog,
     ToggleFilter,
     ToggleHidden,
@@ -34,9 +52,16 @@ pub enum MenuAction {
     OpenConfigDialog,
     OpenLicensesDialog,
     SetLanguage(Option<Language>),
+    SetTheme(ThemeKind),
 }
 
-pub fn render_top_menu_bar(ctx: &egui::Context, i18n: &I18n, config_lang: Option<&str>) -> Option<MenuAction> {
+pub fn render_top_menu_bar(
+    ctx: &egui::Context,
+    i18n: &I18n,
+    config_lang: Option<&str>,
+    current_theme: ThemeKind,
+    palette: &ThemePalette,
+) -> Option<MenuAction> {
     let mut action = None;
 
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -120,6 +145,34 @@ pub fn render_top_menu_bar(ctx: &egui::Context, i18n: &I18n, config_lang: Option
                     action = Some(MenuAction::OpenSearchDialog);
                     ui.close_menu();
                 }
+                if ui.button(i18n.t("menu.bookmarks")).clicked() {
+                    action = Some(MenuAction::OpenBookmarks);
+                    ui.close_menu();
+                }
+                if ui.button(i18n.t("menu.quick_view")).clicked() {
+                    action = Some(MenuAction::ToggleQuickView);
+                    ui.close_menu();
+                }
+                if ui.button(i18n.t("menu.multi_rename")).clicked() {
+                    action = Some(MenuAction::OpenMultiRename);
+                    ui.close_menu();
+                }
+                if ui.button(i18n.t("menu.compare_dirs")).clicked() {
+                    action = Some(MenuAction::CompareDirs);
+                    ui.close_menu();
+                }
+                if ui.button(i18n.t("menu.compare_files")).clicked() {
+                    action = Some(MenuAction::CompareFiles);
+                    ui.close_menu();
+                }
+                if ui.button(i18n.t("menu.new_tab")).clicked() {
+                    action = Some(MenuAction::NewTab);
+                    ui.close_menu();
+                }
+                if ui.button(i18n.t("menu.close_tab")).clicked() {
+                    action = Some(MenuAction::CloseTab);
+                    ui.close_menu();
+                }
                 if ui.button(i18n.t("menu.queue")).clicked() {
                     action = Some(MenuAction::OpenQueueDialog);
                     ui.close_menu();
@@ -162,6 +215,18 @@ pub fn render_top_menu_bar(ctx: &egui::Context, i18n: &I18n, config_lang: Option
                     action = Some(MenuAction::OpenConfigDialog);
                     ui.close_menu();
                 }
+                ui.menu_button(i18n.t("menu.theme"), |ui| {
+                    for theme in ThemeKind::ALL {
+                        let is_selected = current_theme == theme;
+                        if ui
+                            .selectable_label(is_selected, i18n.t(theme_label_key(theme)))
+                            .clicked()
+                        {
+                            action = Some(MenuAction::SetTheme(theme));
+                            ui.close_menu();
+                        }
+                    }
+                });
                 ui.separator();
                 ui.menu_button(i18n.t("menu.language"), |ui| {
                     let is_system = config_lang.is_none();
@@ -201,7 +266,7 @@ pub fn render_top_menu_bar(ctx: &egui::Context, i18n: &I18n, config_lang: Option
                 ui.add_space(8.0);
                 let icon_tex = crate::ui::file_dialogs::get_app_icon_texture(ctx);
                 let brand_resp = ui.horizontal(|ui| {
-                    ui.label(RichText::new("Huzar Commander").size(12.0).strong().color(Color32::from_rgb(0, 190, 255)));
+                    ui.label(RichText::new("Huzar Commander").size(12.0).strong().color(palette.accent));
                     ui.add(egui::Image::from_texture(&icon_tex).fit_to_exact_size(egui::vec2(16.0, 16.0)));
                 }).response;
                 if brand_resp.interact(egui::Sense::click()).clicked() {
@@ -214,7 +279,7 @@ pub fn render_top_menu_bar(ctx: &egui::Context, i18n: &I18n, config_lang: Option
     action
 }
 
-pub fn render_bottom_f_keys(ctx: &egui::Context, i18n: &I18n) -> Option<MenuAction> {
+pub fn render_bottom_f_keys(ctx: &egui::Context, i18n: &I18n, palette: &ThemePalette) -> Option<MenuAction> {
     let mut action = None;
 
     egui::TopBottomPanel::bottom("f_keys_bar").show(ctx, |ui| {
@@ -237,12 +302,12 @@ pub fn render_bottom_f_keys(ctx: &egui::Context, i18n: &I18n) -> Option<MenuActi
             for (key_badge, label, key_num) in f_buttons {
                 let text = RichText::new(format!("{} {}", key_badge, label))
                     .size(12.0)
-                    .color(Color32::WHITE)
+                    .color(palette.fkey_btn_fg)
                     .strong();
 
                 let btn = egui::Button::new(text)
-                    .fill(Color32::from_rgb(28, 42, 68))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(50, 75, 115)))
+                    .fill(palette.fkey_btn_bg)
+                    .stroke(Stroke::new(1.0_f32, palette.fkey_btn_border))
                     .min_size(egui::vec2(btn_width, 24.0));
 
                 let resp = ui.add(btn);
@@ -267,19 +332,63 @@ pub fn render_bottom_f_keys(ctx: &egui::Context, i18n: &I18n) -> Option<MenuActi
     action
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_cli_status_bar(
     ctx: &egui::Context,
     active_path: &str,
     cmd_line: &mut String,
+    cmd_history: &[String],
+    cmd_history_idx: &mut Option<usize>,
+    focus_cli: &mut bool,
     status_bar_msg: Option<&(String, std::time::Instant)>,
+    palette: &ThemePalette,
 ) -> bool {
     let mut execute_cmd = false;
 
     egui::TopBottomPanel::bottom("cmd_status_bar").show(ctx, |ui| {
         // Command prompt line
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{}>", active_path)).color(Color32::from_rgb(100, 255, 120)).monospace());
-            let resp = ui.text_edit_singleline(cmd_line);
+            ui.label(RichText::new(format!("{}>", active_path)).color(palette.cli_prompt).monospace());
+            let resp = ui.add(
+                egui::TextEdit::singleline(cmd_line).desired_width(ui.available_width().max(120.0)),
+            );
+            if *focus_cli {
+                resp.request_focus();
+                *focus_cli = false;
+            }
+            if resp.has_focus() && !cmd_history.is_empty() {
+                let (up, down) = ui.input(|i| {
+                    (
+                        !i.modifiers.any() && i.key_pressed(Key::ArrowUp),
+                        !i.modifiers.any() && i.key_pressed(Key::ArrowDown),
+                    )
+                });
+                if up {
+                    let next_idx = match *cmd_history_idx {
+                        None => cmd_history.len().saturating_sub(1),
+                        Some(idx) => idx.saturating_sub(1),
+                    };
+                    *cmd_history_idx = Some(next_idx);
+                    if let Some(entry) = cmd_history.get(next_idx) {
+                        *cmd_line = entry.clone();
+                    }
+                } else if down {
+                    match *cmd_history_idx {
+                        Some(idx) if idx + 1 < cmd_history.len() => {
+                            let next_idx = idx + 1;
+                            *cmd_history_idx = Some(next_idx);
+                            if let Some(entry) = cmd_history.get(next_idx) {
+                                *cmd_line = entry.clone();
+                            }
+                        }
+                        Some(_) => {
+                            *cmd_history_idx = None;
+                            cmd_line.clear();
+                        }
+                        None => {}
+                    }
+                }
+            }
             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 execute_cmd = true;
             }
@@ -288,7 +397,7 @@ pub fn render_cli_status_bar(
         // Status message
         if let Some((msg, time)) = status_bar_msg {
             if time.elapsed().as_secs() < 5 {
-                ui.label(RichText::new(msg).color(Color32::YELLOW));
+                ui.label(RichText::new(msg).color(palette.status_msg));
             }
         }
     });

@@ -32,7 +32,17 @@ pulldown-cmark = { version = "0.12", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "ico"] }
+encoding_rs = "0.8"
+notify = "6"
+regex = "1"
+similar = "2"
+sha2 = "0.10"
+md-5 = "0.10"
+crc32fast = "1"
+tar = "0.4"
+flate2 = "1"
+sevenz-rust = { version = "0.6", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -139,6 +139,17 @@ fn run_search_thread(
     let _ = tx.send(SearchMessage::Finished(found_count));
 }
 
+/// Safely truncates a string to at most `max_chars` Unicode scalar values, appending `...` if truncated.
+pub fn truncate_preview(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}...", prefix)
+    } else {
+        prefix
+    }
+}
+
 fn check_file_for_text(
     path: &Path,
     needle: &str,
@@ -176,12 +187,7 @@ fn check_file_for_text(
         };
 
         if matches {
-            let trimmed = line_cow.trim().to_string();
-            let preview = if trimmed.len() > 120 {
-                format!("{}...", &trimmed[..120])
-            } else {
-                trimmed
-            };
+            let preview = truncate_preview(line_cow.trim(), 120);
             return Ok(Some(preview));
         }
 
