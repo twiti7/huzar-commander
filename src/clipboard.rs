@@ -92,14 +92,18 @@ impl FileClipboard {
             return Ok(());
         }
 
-        self.internal = Some((paths.clone(), op));
-
         #[cfg(windows)]
         {
-            win32::set_clipboard_files(&paths, op)?;
+            let res = win32::set_clipboard_files(&paths, op);
+            self.internal = Some((paths, op));
+            res
         }
 
-        Ok(())
+        #[cfg(not(windows))]
+        {
+            self.internal = Some((paths, op));
+            Ok(())
+        }
     }
 
     pub fn get_files(&self) -> Option<(Vec<PathBuf>, ClipboardOp)> {
@@ -128,8 +132,7 @@ impl FileClipboard {
         {
             self.internal
                 .as_ref()
-                .map(|(p, _)| !p.is_empty())
-                .unwrap_or(false)
+                .is_some_and(|(p, _)| !p.is_empty())
         }
     }
 

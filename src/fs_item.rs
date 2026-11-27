@@ -32,17 +32,15 @@ pub struct FileItem {
 
 /// Returns `true` if metadata describes a symbolic link or a Windows NTFS reparse point (junction).
 pub fn is_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
-    if meta.file_type().is_symlink() {
-        return true;
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        if meta.file_attributes() & 0x0000_0400 != 0 {
-            return true;
-        }
+        meta.file_type().is_symlink() || (meta.file_attributes() & 0x0000_0400 != 0)
     }
-    false
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
 }
 
 impl FileItem {
