@@ -1,6 +1,6 @@
 [package]
 name = "huzar-commander"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Piotr Truskolaski <piotr.truskolaski@gmail.com>"]
 description = "Huzar Commander - Fast, dual-panel orthodox file manager in Rust with streaming viewer and real-time I/O telemetry"

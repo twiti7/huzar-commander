@@ -5,7 +5,7 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust: 2021](https://img.shields.io/badge/Rust-2021%20edition-orange.svg)](https://www.rust-lang.org/)
 [![GUI: eframe/egui 0.31](https://img.shields.io/badge/GUI-eframe%2Fegui%200.31-green.svg)](https://github.com/emilk/egui)
-[![Tests: 94 passing](https://img.shields.io/badge/Tests-94%20passing-brightgreen.svg)](#unit-and-integration-tests)
+[![Tests: 143 passing](https://img.shields.io/badge/Tests-143%20passing-brightgreen.svg)](#unit-and-integration-tests)
 
 A modern, dual-pane orthodox GUI file manager written in pure Rust, inspired by Norton Commander, Total Commander, and FAR Manager. The name draws inspiration from the Polish Hussars (*husaria*) — the two outspread wings represent the two work panels, the armor symbolizes Rust's memory safety guarantees, and the cavalry charge speed reflects blazingly fast I/O streaming with real-time telemetry.
 
@@ -63,23 +63,31 @@ A modern, dual-pane orthodox GUI file manager written in pure Rust, inspired by 
   - Text content search within files (with case-sensitive and case-insensitive options).
   - Clean results table with match preview, path, and size.
   - "Go to file" (instantly navigates the panel to the folder and selects the file) and "View (F3)" buttons.
-- **ZIP Archive Support:**
-  - Browse ZIP archives seamlessly just like regular folders (enter with `Enter` or double click).
+- **Panel Tabs (`Ctrl+T`, `Ctrl+W`, `Ctrl+Tab` / `Ctrl+Shift+Tab`):** Multiple tabs per panel with duplicate tab, middle-click close, right-click lock/unlock, and automatic session persistence on exit.
+- **Directory Hotlist / Bookmarks (`Ctrl+D`):** Save, edit, reorder, and jump to favorite directories (including UNC/network paths) in either panel.
+- **Quick View Panel (`Ctrl+Q`):** Inline split preview in the opposite panel for text, code, images, Markdown, JSON/YAML, hex, or directory summaries.
+- **Multi-Rename Tool (`Ctrl+M`):** Batch renaming with placeholders (`[N]`, `[E]`, `[C]` counter), search & replace with Regex, case conversion, live collision detection, and two-phase atomic rename with Undo.
+- **Compare Directories (`Shift+F2`) & Side-by-Side File Diff (`Ctrl+Shift+D`):** Highlight missing/newer files across panels, and inspect text diffs side-by-side with whitespace toggle and prev/next diff navigation.
+- **Color Themes & Settings Window:** 4 built-in themes (*Midnight Dark*, *Classic Norton Blue*, *Light*, *High Contrast*), configurable font size, row height, file size format (Decimal / Binary / Exact bytes), delete confirmation, and session save/restore.
+- **Extended Archive Support (`.zip`, `.tar`, `.tar.gz`/`.tgz`, `.7z`):**
+  - Browse archives seamlessly just like regular folders (enter with `Enter` or double click).
   - Virtual navigation through nested subdirectories and return to parent (`[..]` / `Backspace`).
   - Quick file preview inside archives using `F3`.
-  - Extract selected files or the entire archive (`F5`) to the opposite panel.
-- **Live File Filtering:**
-  - Built-in `🔍` filter input directly in each panel header (shortcut `Ctrl+F`).
-  - Real-time filtering by mask (`*.rs`), multiple extensions (`*.rs;*.toml`), or substring match.
+  - Extract selected files or the entire archive (`F5`) to the opposite panel with Zip-Slip path traversal protection.
+- **Live File Filtering & Quick Search:**
+  - Built-in `🔍` filter input directly in each panel header (shortcut `Ctrl+F`) supporting masks (`*.rs`), multiple extensions (`*.rs;*.toml`), or substring match.
   - Clear filter with a single click `✖` or `Esc` key.
+  - Direct typing in a panel triggers Quick Search (`Jump`) to navigate directly to matching entries.
+- **Interactive File Conflict Resolution & Safe Transfers:** Conflict dialog (*Overwrite*, *Overwrite all*, *Overwrite older*, *Skip*, *Skip all*, *Rename*), modification timestamp (`mtime`) preservation, copy-into-subfolder guard, and exit confirmation when background tasks are running.
+- **Breadcrumbs, Navigation History (`Alt+←`/`Alt+→`), Auto-Refresh & Drag-and-Drop:** Clickable breadcrumbs, editable path bar (`Ctrl+L`), back/forward navigation history, automatic background directory refresh (`notify`), drag-and-drop between panels and from OS, and panel sync (`Ctrl+←` / `Ctrl+→`).
 - **Move (`F6`) & Rename (`F2` / `Shift+F6`):** Blazing fast atomic move on the same volume, buffered copy-with-delete across different filesystems, and dedicated rename dialog.
 - **Create Folder (`F7`) & New File:** Dialogs for creating new folders (`F7`) or custom files, plus quick `.txt` document creation from the context menu.
 - **Delete (`F8` / `Delete`):** With option for safe deletion to the system Recycle Bin.
-- **Properties (`Alt+Enter`):** Detailed item properties modal with asynchronous background folder size and file/directory count calculation, plus native Windows Properties access from the context menu.
-- **Quick View (`F3`):** Modal streaming viewer (64 KB chunks) supporting Text, Hex dumper, Markdown (with Mermaid diagram rendering), and JSON/YAML with syntax highlighting and interactive tree view.
+- **Properties & Checksums (`Alt+Enter`):** Detailed item properties modal with asynchronous background folder size and file/directory count calculation, streaming SHA-256, MD5, and CRC32 checksum calculation/verification, plus native Windows Properties access from the context menu.
+- **Enhanced F3 Viewer:** Modal streaming viewer (64 KB chunks) supporting syntax-highlighted code with line numbers, built-in image viewer (Fit / 100%), Markdown (with Mermaid diagram rendering), JSON/YAML with interactive tree view, Hex dumper, encoding selector (`UTF-8`, `Windows-1250`, `UTF-16`), word wrap, tail mode, and asynchronous forward/backward text search.
 - **Edit (`F4`):** Open in default text editor (Notepad) or configured custom editor associations.
 - **Bilingual UI (i18n — PL / EN):** Automatic OS language detection with runtime switching between Polish and English.
-- **Integrated Command Line (CLI):** Execute arbitrary OS shell commands directly in the working directory of the active panel.
+- **Integrated Command Line (CLI):** Execute arbitrary OS shell commands (including `cd`) directly in the working directory of the active panel, with `Ctrl+Enter` / `Ctrl+Shift+Enter` to insert the selected filename or full path.
 
 ## Keyboard & Mouse Shortcuts
 
@@ -118,7 +126,19 @@ A modern, dual-pane orthodox GUI file manager written in pure Rust, inspired by 
 | `Ctrl+H` | Show / hide hidden files |
 | `Ctrl+R` | Refresh panels |
 | `Ctrl+U` | Swap left and right panel paths |
-| `Esc` | Clear filter / Close context menu or active modal dialog |
+| `Alt+Left` / `Alt+Right` | Navigate back / forward in directory history |
+| `Ctrl+Left` / `Ctrl+Right` | Open active directory in opposite panel |
+| `Ctrl+L` | Edit active panel path bar |
+| `Ctrl+T` / `Ctrl+W` | Duplicate active tab / Close active tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Switch to next / previous tab |
+| `Ctrl+D` | Open Directory Hotlist / Bookmarks |
+| `Ctrl+Q` | Toggle Quick View split panel |
+| `Ctrl+M` | Open Multi-Rename Tool |
+| `Shift+F2` | Compare directories across panels |
+| `Ctrl+Shift+D` | Compare files side-by-side (Diff) |
+| `Ctrl+Enter` / `Ctrl+Shift+Enter` | Insert selected item name / full path into CLI |
+| Direct typing | Quick Search (jump to matching file in active panel) |
+| `Esc` | Clear filter / Cancel quick search or loading / Close menu or modal |
 | `Alt+F4` | Exit application |
 
 ## Running and Building
@@ -153,7 +173,7 @@ In a PowerShell terminal in the project directory:
   ```powershell
   .\build_installer.ps1
   ```
-  Produces `target\installer\HuzarCommander-Setup-v0.2.0.exe` (Inno Setup) with bilingual support (PL/EN), desktop & start menu shortcuts, uninstaller in Windows Settings, and Windows Explorer context menu integration (*"Open in Huzar Commander"*).
+  Produces `target\installer\HuzarCommander-Setup-v0.3.0.exe` (Inno Setup) with bilingual support (PL/EN), desktop & start menu shortcuts, uninstaller in Windows Settings, and Windows Explorer context menu integration (*"Open in Huzar Commander"*).
 
 ### Linux / Ubuntu / Debian
 Before running for the first time, ensure the standard windowing and rendering development packages (X11 / Wayland / OpenGL) are installed:
@@ -177,17 +197,22 @@ On Linux, the file manager automatically detects:
 
 ## Unit and Integration Tests
 
-The project features a comprehensive suite of **94 automated tests** (across 17 test modules in the `tests/` directory) covering:
+The project features a comprehensive suite of **143 automated tests** (across 25 test modules in the `tests/` directory) covering:
 - File metadata parsing and attributes (`fs_item`),
-- Dual-panel sorting, range/batch selection, and asynchronous cancellable directory loading (`panel`),
-- Selection operations (`toggle_select`, `select_range`, `select_all`, `deselect_all`, `invert_selection`) and aggregated size calculation (`panel`),
+- Dual-panel sorting, range/batch selection, navigation history, quick search, directory comparison, and asynchronous cancellable directory loading (`panel`),
+- Multi-tab panel management (`tabs`),
 - File clipboard `CF_HDROP` UTF-16 payload encoding/decoding and in-memory clipboard operations (`clipboard`),
 - Context menu state lifecycle, hit-testing, executable detection, non-colliding file naming, and bundled font glyph verification (`context_menu`),
 - System drive detection and volume capacity queries (`drives`),
-- Asynchronous I/O engine: directory creation, file copying and moving, task queue handling (`worker`),
-- ZIP archives: virtual tree browsing, compression, and decompression (`zip_support`),
+- Asynchronous I/O engine: directory creation, file copying/moving, mtime preservation, conflict resolution, and task queue handling (`worker`),
+- Archives: `.zip`, `.tar`, `.tar.gz`/`.tgz`, and `.7z` virtual browsing, compression, decompression, and Zip-Slip protection (`archive`, `zip_support`),
+- Multi-rename placeholders, regex replacement, collision detection, and two-phase undo (`multi_rename`),
+- Side-by-side text diffing and streaming SHA-256/MD5/CRC32 checksums (`diff`, `checksum`),
+- Configuration persistence, bookmarks/tabs session storage, themes, and size formatting (`config`, `theme`),
+- Background directory watcher with debounce (`watcher`),
+- CLI `cd` path parsing and asynchronous file search (`cli`, `search`),
 - Internationalization (i18n): PL/EN key parity, language detection, and formatting (`i18n`),
-- Viewer engines: Markdown, JSON/YAML, Mermaid diagrams, Hex dumper, and 64 KB streaming buffer (`viewer`).
+- Viewer engines: Code syntax highlighting, Markdown, JSON/YAML, Mermaid diagrams, Hex dumper, encoding decoding, and 64 KB streaming buffer (`ui_state`, `ui_markdown`, `ui_mermaid`, `ui_structured`).
 
 Running tests:
 ```powershell
