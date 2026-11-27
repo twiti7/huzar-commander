@@ -38,6 +38,37 @@ fn normalize_cd_path(path: &Path) -> PathBuf {
     }
 }
 
+fn parse_windows_drive_prefix(raw: &str) -> Option<(char, &str)> {
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let drive = (bytes[0] as char).to_ascii_uppercase();
+        let rest = &raw[2..];
+        if rest.is_empty() || rest.starts_with('\\') || rest.starts_with('/') {
+            return Some((drive, rest.trim_start_matches(['\\', '/'])));
+        }
+    }
+    None
+}
+
+fn normalize_windows_drive_path(drive: char, rest: &str) -> PathBuf {
+    let mut stack: Vec<&str> = Vec::new();
+    for part in rest.split(['\\', '/']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            stack.pop();
+        } else {
+            stack.push(part);
+        }
+    }
+    if stack.is_empty() {
+        PathBuf::from(format!("{}:\\", drive))
+    } else {
+        PathBuf::from(format!("{}:\\{}", drive, stack.join(r"\")))
+    }
+}
+
 fn expand_tilde(raw: &str) -> PathBuf {
     if raw == "~" {
         return user_home_dir().unwrap_or_else(|| PathBuf::from(raw));
@@ -110,6 +141,9 @@ pub fn parse_cd_command(cmd: &str, current_dir: &Path) -> Option<PathBuf> {
             }
             return Some(PathBuf::from(format!(r"\\{}", server)));
         }
+        if let Some((drive, _)) = parse_windows_drive_prefix(&current_dir.to_string_lossy()) {
+            return Some(PathBuf::from(format!("{}:\\", drive)));
+        }
         let mut root = PathBuf::new();
         for comp in current_dir.components() {
             match comp {
@@ -137,6 +171,19 @@ pub fn parse_cd_command(cmd: &str, current_dir: &Path) -> Option<PathBuf> {
             arg
         );
         return crate::panel::normalize_unc_path(&combined);
+    }
+
+    if let Some((drive, rest)) = parse_windows_drive_prefix(arg) {
+        return Some(normalize_windows_drive_path(drive, rest));
+    }
+    if !arg.starts_with('~') {
+        if let Some((drive, cwd_rest)) = parse_windows_drive_prefix(&current_dir.to_string_lossy()) {
+            if arg.starts_with('\\') || arg.starts_with('/') {
+                return Some(normalize_windows_drive_path(drive, arg));
+            }
+            let combined = format!("{}\\{}", cwd_rest.trim_end_matches(['\\', '/']), arg);
+            return Some(normalize_windows_drive_path(drive, &combined));
+        }
     }
 
     let expanded = expand_tilde(arg);

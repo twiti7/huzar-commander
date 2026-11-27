@@ -46,17 +46,29 @@ impl ArchiveFormat {
     }
 
     /// Strips `.tar.gz` cleanly or falls back to `file_stem` for single extensions.
+    /// Handles both `/` and `\` path separators across platforms.
     pub fn strip_archive_stem(path: &Path) -> String {
-        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+        let raw = path.to_string_lossy();
+        let name = raw
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("");
+        let is_drive_only = name.len() == 2
+            && name.as_bytes()[0].is_ascii_alphabetic()
+            && name.as_bytes()[1] == b':';
+        if !name.is_empty() && !is_drive_only {
             let lower = name.to_ascii_lowercase();
             if lower.ends_with(".tar.gz") && name.len() > 7 {
                 return name[..name.len() - 7].to_string();
             }
+            if let Some(stem) = Path::new(name).file_stem().and_then(|s| s.to_str()) {
+                if !stem.is_empty() {
+                    return stem.to_string();
+                }
+            }
         }
-        path.file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "archive".to_string())
+        "archive".to_string()
     }
 }
 

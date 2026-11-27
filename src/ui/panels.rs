@@ -67,15 +67,16 @@ pub fn build_breadcrumb_segments(path: &std::path::Path) -> Vec<(String, std::pa
 
     // 1. Windows UNC path (\\server, \\server\share, \\server\share\dir...)
     if let Some((server, share_opt, rest)) = crate::panel::parse_unc_parts(path) {
-        let srv_root = format!(r"\\{}", server);
-        let mut acc = std::path::PathBuf::from(&srv_root);
-        segments.push((srv_root, acc.clone()));
+        let mut acc = format!(r"\\{}", server);
+        segments.push((acc.clone(), std::path::PathBuf::from(&acc)));
         if let Some(share) = share_opt {
-            acc.push(&share);
-            segments.push((share, acc.clone()));
+            acc.push('\\');
+            acc.push_str(&share);
+            segments.push((share, std::path::PathBuf::from(&acc)));
             for part in rest {
-                acc.push(&part);
-                segments.push((part, acc.clone()));
+                acc.push('\\');
+                acc.push_str(&part);
+                segments.push((part, std::path::PathBuf::from(&acc)));
             }
         }
         return segments;
@@ -84,24 +85,29 @@ pub fn build_breadcrumb_segments(path: &std::path::Path) -> Vec<(String, std::pa
     // 2. Windows drive path (C:\...)
     let bytes = trimmed.as_bytes();
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        let drive_root = format!("{}:\\", (bytes[0] as char).to_ascii_uppercase());
-        let mut acc = std::path::PathBuf::from(&drive_root);
-        segments.push((drive_root, acc.clone()));
+        let mut acc = format!("{}:\\", (bytes[0] as char).to_ascii_uppercase());
+        segments.push((acc.clone(), std::path::PathBuf::from(&acc)));
         let rest = trimmed[2..].trim_start_matches(['\\', '/']);
         for part in rest.split(['\\', '/']).filter(|p| !p.is_empty()) {
-            acc.push(part);
-            segments.push((part.to_string(), acc.clone()));
+            if !acc.ends_with('\\') {
+                acc.push('\\');
+            }
+            acc.push_str(part);
+            segments.push((part.to_string(), std::path::PathBuf::from(&acc)));
         }
         return segments;
     }
 
     // 3. Unix root path (/...)
     if let Some(rest) = trimmed.strip_prefix('/') {
-        let mut acc = std::path::PathBuf::from("/");
-        segments.push(("/".to_string(), acc.clone()));
+        let mut acc = String::from("/");
+        segments.push(("/".to_string(), std::path::PathBuf::from(&acc)));
         for part in rest.split('/').filter(|p| !p.is_empty()) {
-            acc.push(part);
-            segments.push((part.to_string(), acc.clone()));
+            if !acc.ends_with('/') {
+                acc.push('/');
+            }
+            acc.push_str(part);
+            segments.push((part.to_string(), std::path::PathBuf::from(&acc)));
         }
         return segments;
     }

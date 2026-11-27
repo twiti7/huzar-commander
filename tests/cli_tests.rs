@@ -13,6 +13,17 @@ fn test_parse_cd_command_relative_and_parent() {
         parse_cd_command(r#"cd "my folder""#, cwd),
         Some(PathBuf::from(r"C:\Workspace\commander\my folder"))
     );
+
+    let unix_cwd = Path::new("/home/user/commander");
+    assert_eq!(parse_cd_command("cd ..", unix_cwd), Some(PathBuf::from("/home/user")));
+    assert_eq!(
+        parse_cd_command("cd ../other", unix_cwd),
+        Some(PathBuf::from("/home/user/other"))
+    );
+    assert_eq!(
+        parse_cd_command("cd src", unix_cwd),
+        Some(PathBuf::from("/home/user/commander/src"))
+    );
 }
 
 #[test]

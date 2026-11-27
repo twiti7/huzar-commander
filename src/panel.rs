@@ -85,13 +85,12 @@ pub fn parent_dir_for_navigation(path: &Path) -> Option<PathBuf> {
         if rest.is_empty() {
             return Some(PathBuf::from(format!(r"\\{}", server)));
         }
-        let mut p = PathBuf::from(format!(r"\\{}\{}", server, share));
-        if rest.len() > 1 {
-            for seg in &rest[..rest.len() - 1] {
-                p.push(seg);
-            }
+        let mut out = format!(r"\\{}\{}", server, share);
+        for seg in &rest[..rest.len() - 1] {
+            out.push('\\');
+            out.push_str(seg);
         }
-        return Some(p);
+        return Some(PathBuf::from(out));
     }
     path.parent().map(|p| p.to_path_buf())
 }

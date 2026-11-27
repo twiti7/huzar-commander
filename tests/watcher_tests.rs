@@ -13,7 +13,7 @@ fn test_watcher_paths_match_and_is_watchable() {
     assert!(!is_watchable_dir(Path::new(r"\\TRUENAS")));
     assert!(!is_watchable_dir(&temp_dir.join("missing_subdir")));
 
-    let with_slash = format!("{}\\", temp_dir.to_string_lossy());
+    let with_slash = format!("{}{}", temp_dir.to_string_lossy(), std::path::MAIN_SEPARATOR);
     assert!(paths_match(&temp_dir, Path::new(&with_slash)));
 
     let _ = std::fs::remove_dir_all(&temp_dir);

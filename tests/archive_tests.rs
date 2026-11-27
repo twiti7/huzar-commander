@@ -75,6 +75,18 @@ fn test_archive_format_detection_and_stem() {
         ArchiveFormat::strip_archive_stem(Path::new(r"C:\tmp\release.7z")),
         "release"
     );
+    assert_eq!(
+        ArchiveFormat::strip_archive_stem(Path::new("/tmp/backup.tar.gz")),
+        "backup"
+    );
+    assert_eq!(
+        ArchiveFormat::strip_archive_stem(Path::new("/tmp/release.7z")),
+        "release"
+    );
+    assert_eq!(
+        ArchiveFormat::strip_archive_stem(Path::new("archive.tgz")),
+        "archive"
+    );
 }
 
 #[test]
